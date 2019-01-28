@@ -6,13 +6,16 @@
 package main
 
 import (
+	"crypto/md5"
 	"crypto/x509"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +50,11 @@ var quiet = flag.Bool("quiet", false, "Be quiet regarding errors")
 var iface = flag.String("i", "eth0", "Interface to read packets from")
 var fname = flag.String("r", "", "Filename to read from, overrides -i")
 
+// writing
+var outFolder = flag.String("w", "output", "Folder to write to")
+var jobQ chan TLSSession
+var cancelC chan string
+
 var memprofile = flag.String("memprofile", "", "Write memory profile")
 
 var stats struct {
@@ -67,6 +75,34 @@ var stats struct {
 	overlapPackets      int
 }
 
+type TLSRecord struct {
+	ServerIP          string `json:"server_ip"`
+	ServerPort        string `json:"server_port"`
+	ClientIP          string `json:"client_ip"`
+	ClientPort        string `json:"client_port"`
+	TLSHDigest        string `json:"tlsh_digest"`
+	Timestamp         uint64 `json:"timestamp"`
+	JA3               string `json:"ja3"`
+	JA3Digest         string `json:"ja3_digest"`
+	JA3S              string `json:"ja3s"`
+	JA3SDigest        string `json:"ja3s_digest"`
+	Certificate       string `json: "certificate"`
+	CertificateDigest string `json: "certificate_digest"`
+}
+
+type TLSSession struct {
+	record   TLSRecord
+	tlsHdskR layers.TLSHandshakeRecord
+	certs    []*x509.Certificate
+}
+
+var grease = map[uint16]bool{
+	0x0a0a: true, 0x1a1a: true, 0x2a2a: true, 0x3a3a: true,
+	0x4a4a: true, 0x5a5a: true, 0x6a6a: true, 0x7a7a: true,
+	0x8a8a: true, 0x9a9a: true, 0xaaaa: true, 0xbaba: true,
+	0xcaca: true, 0xdada: true, 0xeaea: true, 0xfafa: true,
+}
+
 const closeTimeout time.Duration = time.Hour * 24 // Closing inactive: TODO: from CLI
 const timeout time.Duration = time.Minute * 5     // Pending bytes: TODO: from CLI
 
@@ -83,7 +119,7 @@ func Error(t string, s string, a ...interface{}) {
 	errorsMap[t] = nb + 1
 	errorsMapMutex.Unlock()
 	if outputLevel >= 0 {
-		fmt.Printf(s, a...)
+		//fmt.Printf(s, a...)
 	}
 }
 func Info(s string, a ...interface{}) {
@@ -149,6 +185,7 @@ type tcpStream struct {
 	reversed       bool
 	urls           []string
 	ident          string
+	tlsSession     TLSSession
 	sync.Mutex
 }
 
@@ -252,28 +289,138 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 				//Debug("TLS: %s\n", gopacket.LayerDump(tls))
 				//		Debug("TLS: %s\n", gopacket.LayerGoString(tls))
 				if tls.Handshake != nil {
-					for i, tlsrecord := range tls.Handshake {
-						fmt.Printf("TLS record %#d %#v\n", i, tlsrecord.TLSHandshakeMsgType)
-						if tlsrecord.TLSHandshakeMsgType == 11 {
-							certs := make([]*x509.Certificate, len(tlsrecord.TLSHandshakeCertificate.Certificates))
-							for i, asn1Data := range tlsrecord.TLSHandshakeCertificate.Certificates {
+					for _, tlsrecord := range tls.Handshake {
+						switch tlsrecord.TLSHandshakeMsgType {
+						// Client Hello
+						case 1:
+							t.tlsSession.tlsHdskR.TLSHandshakeClientHello = tlsrecord.TLSHandshakeClientHello
+							t.tlsSession.record.ClientIP, t.tlsSession.record.ServerIP, t.tlsSession.record.ClientPort, t.tlsSession.record.ServerPort = getIPPorts(t)
+							// Set up first seen
+							t.tlsSession.record.Timestamp = uint64(time.Now().Unix())
+							t.tlsSession.gatherJa3()
+						// Server Hello
+						case 2:
+							t.tlsSession.tlsHdskR.TLSHandshakeServerHello = tlsrecord.TLSHandshakeServerHello
+							t.tlsSession.gatherJa3s()
+						// Server Certificate
+						case 11:
+							//certs := make([]*x509.Certificate, len(tlsrecord.TLSHandshakeCertificate.Certificates))
+							for _, asn1Data := range tlsrecord.TLSHandshakeCertificate.Certificates {
 								cert, err := x509.ParseCertificate(asn1Data)
 								if err != nil {
 									panic("tls: failed to parse certificate from server: " + err.Error())
 								}
-								certs[i] = cert
-								err = ioutil.WriteFile(fmt.Sprintf("./cert%d.crt", i), certs[i].Raw, 0644)
-								if err != nil {
-									panic("Could not write to file.")
-								}
+								t.tlsSession.certs = append(t.tlsSession.certs, cert)
 							}
-
+							// If we get a cert, we consider the handshake as finished and ready to ship to D4
+							queueSession(t.tlsSession)
+						default:
+							break
 						}
 					}
 				}
 			}
 		}
 	}
+}
+
+func getIPPorts(t *tcpStream) (string, string, string, string) {
+	tmp := strings.Split(fmt.Sprintf("%v", t.net), "->")
+	ipc := tmp[0]
+	ips := tmp[1]
+	tmp = strings.Split(fmt.Sprintf("%v", t.transport), "->")
+	cp := tmp[0]
+	ps := tmp[1]
+	return ipc, ips, cp, ps
+}
+
+func (ts *TLSSession) gatherJa3s() bool {
+	var buf []byte
+	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.TLSHandshakeServerHello.Vers), 10)
+	// byte (44) is ","
+	buf = append(buf, byte(44))
+
+	// If there are Cipher Suites
+	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.TLSHandshakeServerHello.CipherSuite), 10)
+	buf = append(buf, byte(44))
+
+	// If there are extensions
+	if len(ts.tlsHdskR.TLSHandshakeServerHello.AllExtensions) > 0 {
+		for i, e := range ts.tlsHdskR.TLSHandshakeServerHello.AllExtensions {
+			// TODO check this grease thingy
+			if grease[uint16(e)] == false {
+				buf = strconv.AppendInt(buf, int64(e), 10)
+				if (i + 1) < len(ts.tlsHdskR.TLSHandshakeServerHello.AllExtensions) {
+					// byte(45) is "-"
+					buf = append(buf, byte(45))
+				}
+			}
+		}
+	}
+
+	ts.record.JA3S = string(buf)
+	tmp := md5.Sum(buf)
+	ts.record.JA3SDigest = hex.EncodeToString(tmp[:])
+
+	return true
+}
+
+func (ts *TLSSession) gatherJa3() bool {
+	var buf []byte
+	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.TLSHandshakeClientHello.Vers), 10)
+	// byte (44) is ","
+	buf = append(buf, byte(44))
+
+	// If there are Cipher Suites
+	if len(ts.tlsHdskR.TLSHandshakeClientHello.CipherSuites) > 0 {
+		for i, cs := range ts.tlsHdskR.TLSHandshakeClientHello.CipherSuites {
+			buf = strconv.AppendInt(buf, int64(cs), 10)
+			// byte(45) is "-"
+			if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.CipherSuites) {
+				buf = append(buf, byte(45))
+			}
+		}
+	}
+	buf = append(buf, byte(44))
+
+	// If there are extensions
+	if len(ts.tlsHdskR.TLSHandshakeClientHello.AllExtensions) > 0 {
+		for i, e := range ts.tlsHdskR.TLSHandshakeClientHello.AllExtensions {
+			// TODO check this grease thingy
+			if grease[uint16(e)] == false {
+				buf = strconv.AppendInt(buf, int64(e), 10)
+				if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.AllExtensions) {
+					buf = append(buf, byte(45))
+				}
+			}
+		}
+	}
+	buf = append(buf, byte(44))
+
+	// If there are Supported Curves
+	if len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedCurves) > 0 {
+		for i, cs := range ts.tlsHdskR.TLSHandshakeClientHello.SupportedCurves {
+			buf = strconv.AppendInt(buf, int64(cs), 10)
+			if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedCurves) {
+				buf = append(buf, byte(45))
+			}
+		}
+	}
+	buf = append(buf, byte(44))
+
+	// If there are Supported Points
+	if len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedPoints) > 0 {
+		for i, cs := range ts.tlsHdskR.TLSHandshakeClientHello.SupportedPoints {
+			buf = strconv.AppendInt(buf, int64(cs), 10)
+			if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedPoints) {
+				buf = append(buf, byte(45))
+			}
+		}
+	}
+	ts.record.JA3 = string(buf)
+	tmp := md5.Sum(buf)
+	ts.record.JA3Digest = hex.EncodeToString(tmp[:])
+	return true
 }
 
 func (t *tcpStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
@@ -330,8 +477,17 @@ func main() {
 	streamPool := reassembly.NewStreamPool(streamFactory)
 	assembler := reassembly.NewAssembler(streamPool)
 
+	// Signal chan for system signals
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt)
+
+	// Job chan to hold Completed sessions to write
+	jobQ = make(chan TLSSession, 100)
+	cancelC := make(chan string)
+
+	// We start a worker to send the processed TLS connection the outside world
+	var wg sync.WaitGroup
+	go processCompletedSession(jobQ, cancelC, &wg)
 
 	for packet := range source.Packets() {
 		count++
@@ -391,6 +547,7 @@ func main() {
 		select {
 		case <-signalChan:
 			fmt.Fprintf(os.Stderr, "\nCaught SIGINT: aborting\n")
+			cancelC <- "stop"
 			done = true
 		default:
 			// NOP: continue
@@ -402,5 +559,48 @@ func main() {
 
 	assembler.FlushAll()
 	streamFactory.WaitGoRoutines()
+	wg.Wait()
+}
 
+func processCompletedSession(jobQ <-chan TLSSession, cancelC <-chan string, wg *sync.WaitGroup) {
+	for {
+		select {
+		case <-cancelC:
+			return
+		case tlss := <-jobQ:
+			wg.Add(1)
+			output(tlss, wg)
+		}
+	}
+}
+
+// Tries to enqueue or false
+func queueSession(t TLSSession) bool {
+	select {
+	case jobQ <- t:
+		return true
+	default:
+		return false
+	}
+}
+
+func output(t TLSSession, wg *sync.WaitGroup) {
+	fmt.Println("---------------SESSION START-------------------")
+	fmt.Printf("Time: %d\n", t.record.Timestamp)
+	fmt.Printf("Client: %v:%v\n", t.record.ClientIP, t.record.ClientPort)
+	fmt.Printf("Server: %v:%v\n", t.record.ServerIP, t.record.ServerPort)
+	fmt.Printf("ja3: %q\n", t.record.JA3)
+	fmt.Printf("ja3 Digest: %q\n", t.record.JA3Digest)
+	fmt.Printf("ja3s: %q\n", t.record.JA3S)
+	fmt.Printf("ja3s Digest: %q\n", t.record.JA3SDigest)
+	for i, cert := range t.certs {
+		fmt.Printf("Certificate Issuer: %q\n", cert.Issuer)
+		fmt.Printf("Certificate Subject: %q\n", cert.Subject)
+		err := ioutil.WriteFile(fmt.Sprintf("./cert%d.crt", i), cert.Raw, 0644)
+		if err != nil {
+			panic("Could not write to file.")
+		}
+	}
+	fmt.Println("---------------SESSION  END--------------------")
+	wg.Done()
 }
