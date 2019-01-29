@@ -6,11 +6,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -51,7 +54,8 @@ var iface = flag.String("i", "eth0", "Interface to read packets from")
 var fname = flag.String("r", "", "Filename to read from, overrides -i")
 
 // writing
-var outFolder = flag.String("w", "output", "Folder to write to")
+var outCerts = flag.String("w", "", "Folder to write certificates into")
+var outJSON = flag.String("j", "", "Folder to write certificates into, stdin if not set")
 var jobQ chan TLSSession
 var cancelC chan string
 
@@ -75,25 +79,23 @@ var stats struct {
 	overlapPackets      int
 }
 
-type TLSRecord struct {
-	ServerIP          string `json:"server_ip"`
-	ServerPort        string `json:"server_port"`
-	ClientIP          string `json:"client_ip"`
-	ClientPort        string `json:"client_port"`
-	TLSHDigest        string `json:"tlsh_digest"`
-	Timestamp         uint64 `json:"timestamp"`
-	JA3               string `json:"ja3"`
-	JA3Digest         string `json:"ja3_digest"`
-	JA3S              string `json:"ja3s"`
-	JA3SDigest        string `json:"ja3s_digest"`
-	Certificate       string `json: "certificate"`
-	CertificateDigest string `json: "certificate_digest"`
+type SessionRecord struct {
+	ServerIP     string
+	ServerPort   string
+	ClientIP     string
+	ClientPort   string
+	TLSHDigest   string
+	Timestamp    time.Time
+	JA3          string
+	JA3Digest    string
+	JA3S         string
+	JA3SDigest   string
+	Certificates []*x509.Certificate
 }
 
 type TLSSession struct {
-	record   TLSRecord
+	record   SessionRecord
 	tlsHdskR layers.TLSHandshakeRecord
-	certs    []*x509.Certificate
 }
 
 var grease = map[uint16]bool{
@@ -110,6 +112,25 @@ var outputLevel int
 var errorsMap map[string]uint
 var errorsMapMutex sync.Mutex
 var errors uint
+
+func (t *TLSSession) String() string {
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("---------------SESSION START-------------------\n"))
+	buf.WriteString(fmt.Sprintf("Time: %d\n", t.record.Timestamp))
+	buf.WriteString(fmt.Sprintf("Client: %v:%v\n", t.record.ClientIP, t.record.ClientPort))
+	buf.WriteString(fmt.Sprintf("Server: %v:%v\n", t.record.ServerIP, t.record.ServerPort))
+	buf.WriteString(fmt.Sprintf("ja3: %q\n", t.record.JA3))
+	buf.WriteString(fmt.Sprintf("ja3 Digest: %q\n", t.record.JA3Digest))
+	buf.WriteString(fmt.Sprintf("ja3s: %q\n", t.record.JA3S))
+	buf.WriteString(fmt.Sprintf("ja3s Digest: %q\n", t.record.JA3SDigest))
+	for _, cert := range t.record.Certificates {
+		buf.WriteString(fmt.Sprintf("Certificate Issuer: %q\n", cert.Issuer))
+		buf.WriteString(fmt.Sprintf("Certificate Subject: %q\n", cert.Subject))
+		buf.WriteString(fmt.Sprintf("Certificate is CA: %t\n", cert.IsCA))
+	}
+	buf.WriteString(fmt.Sprintf("---------------SESSION  END--------------------\n"))
+	return buf.String()
+}
 
 // Too bad for perf that a... is evaluated
 func Error(t string, s string, a ...interface{}) {
@@ -296,7 +317,8 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 							t.tlsSession.tlsHdskR.TLSHandshakeClientHello = tlsrecord.TLSHandshakeClientHello
 							t.tlsSession.record.ClientIP, t.tlsSession.record.ServerIP, t.tlsSession.record.ClientPort, t.tlsSession.record.ServerPort = getIPPorts(t)
 							// Set up first seen
-							t.tlsSession.record.Timestamp = uint64(time.Now().Unix())
+							info := sg.CaptureInfo(0)
+							t.tlsSession.record.Timestamp = info.Timestamp
 							t.tlsSession.gatherJa3()
 						// Server Hello
 						case 2:
@@ -309,8 +331,9 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 								cert, err := x509.ParseCertificate(asn1Data)
 								if err != nil {
 									panic("tls: failed to parse certificate from server: " + err.Error())
+								} else {
+									t.tlsSession.record.Certificates = append(t.tlsSession.record.Certificates, cert)
 								}
-								t.tlsSession.certs = append(t.tlsSession.certs, cert)
 							}
 							// If we get a cert, we consider the handshake as finished and ready to ship to D4
 							queueSession(t.tlsSession)
@@ -585,22 +608,49 @@ func queueSession(t TLSSession) bool {
 }
 
 func output(t TLSSession, wg *sync.WaitGroup) {
-	fmt.Println("---------------SESSION START-------------------")
-	fmt.Printf("Time: %d\n", t.record.Timestamp)
-	fmt.Printf("Client: %v:%v\n", t.record.ClientIP, t.record.ClientPort)
-	fmt.Printf("Server: %v:%v\n", t.record.ServerIP, t.record.ServerPort)
-	fmt.Printf("ja3: %q\n", t.record.JA3)
-	fmt.Printf("ja3 Digest: %q\n", t.record.JA3Digest)
-	fmt.Printf("ja3s: %q\n", t.record.JA3S)
-	fmt.Printf("ja3s Digest: %q\n", t.record.JA3SDigest)
-	for i, cert := range t.certs {
-		fmt.Printf("Certificate Issuer: %q\n", cert.Issuer)
-		fmt.Printf("Certificate Subject: %q\n", cert.Subject)
-		err := ioutil.WriteFile(fmt.Sprintf("./cert%d.crt", i), cert.Raw, 0644)
-		if err != nil {
-			panic("Could not write to file.")
+
+	jsonRecord, _ := json.MarshalIndent(t.record, "", "    ")
+
+	// If an output folder was specified for certificates
+	if *outCerts != "" {
+		if _, err := os.Stat(fmt.Sprintf("./%s", *outCerts)); !os.IsNotExist(err) {
+			for _, cert := range t.record.Certificates {
+				go func(cert *x509.Certificate) {
+					wg.Add(1)
+					err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.crt", *outCerts, t.record.Timestamp.Format(time.RFC3339)), cert.Raw, 0644)
+					if err != nil {
+						panic("Could not write to file.")
+					} else {
+						wg.Done()
+					}
+				}(cert)
+			}
+		} else {
+			panic(fmt.Sprintf("./%s does not exist", *outCerts))
 		}
 	}
-	fmt.Println("---------------SESSION  END--------------------")
+
+	// If an output folder was specified for json files
+	if *outJSON != "" {
+		if _, err := os.Stat(fmt.Sprintf("./%s", *outJSON)); !os.IsNotExist(err) {
+			go func() {
+				wg.Add(1)
+				err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.json", *outJSON, t.record.Timestamp.Format(time.RFC3339)), jsonRecord, 0644)
+				if err != nil {
+					panic("Could not write to file.")
+				} else {
+					wg.Done()
+				}
+			}()
+		} else {
+			panic(fmt.Sprintf("./%s does not exist", *outJSON))
+		}
+		// If not folder specidied, we output to stdout
+	} else {
+		r := bytes.NewReader(jsonRecord)
+		io.Copy(os.Stdout, r)
+	}
+
+	Debug(t.String())
 	wg.Done()
 }
