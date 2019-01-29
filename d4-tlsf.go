@@ -57,7 +57,6 @@ var fname = flag.String("r", "", "Filename to read from, overrides -i")
 var outCerts = flag.String("w", "", "Folder to write certificates into")
 var outJSON = flag.String("j", "", "Folder to write certificates into, stdin if not set")
 var jobQ chan TLSSession
-var cancelC chan string
 
 var memprofile = flag.String("memprofile", "", "Write memory profile")
 
@@ -509,8 +508,9 @@ func main() {
 	cancelC := make(chan string)
 
 	// We start a worker to send the processed TLS connection the outside world
-	var wg sync.WaitGroup
-	go processCompletedSession(jobQ, cancelC, &wg)
+	var w sync.WaitGroup
+	w.Add(1)
+	go processCompletedSession(jobQ, &w)
 
 	for packet := range source.Packets() {
 		count++
@@ -582,17 +582,21 @@ func main() {
 
 	assembler.FlushAll()
 	streamFactory.WaitGoRoutines()
-	wg.Wait()
+
+	// All systems gone
+	// We close the processing queue
+	close(jobQ)
+	w.Wait()
 }
 
-func processCompletedSession(jobQ <-chan TLSSession, cancelC <-chan string, wg *sync.WaitGroup) {
+func processCompletedSession(jobQ <-chan TLSSession, w *sync.WaitGroup) {
 	for {
-		select {
-		case <-cancelC:
+		tlss, more := <-jobQ
+		if more {
+			output(tlss)
+		} else {
+			w.Done()
 			return
-		case tlss := <-jobQ:
-			wg.Add(1)
-			output(tlss, wg)
 		}
 	}
 }
@@ -607,7 +611,7 @@ func queueSession(t TLSSession) bool {
 	}
 }
 
-func output(t TLSSession, wg *sync.WaitGroup) {
+func output(t TLSSession) {
 
 	jsonRecord, _ := json.MarshalIndent(t.record, "", "    ")
 
@@ -615,15 +619,10 @@ func output(t TLSSession, wg *sync.WaitGroup) {
 	if *outCerts != "" {
 		if _, err := os.Stat(fmt.Sprintf("./%s", *outCerts)); !os.IsNotExist(err) {
 			for _, cert := range t.record.Certificates {
-				go func(cert *x509.Certificate) {
-					wg.Add(1)
-					err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.crt", *outCerts, t.record.Timestamp.Format(time.RFC3339)), cert.Raw, 0644)
-					if err != nil {
-						panic("Could not write to file.")
-					} else {
-						wg.Done()
-					}
-				}(cert)
+				err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.crt", *outCerts, t.record.Timestamp.Format(time.RFC3339)), cert.Raw, 0644)
+				if err != nil {
+					panic("Could not write to file.")
+				}
 			}
 		} else {
 			panic(fmt.Sprintf("./%s does not exist", *outCerts))
@@ -633,24 +632,21 @@ func output(t TLSSession, wg *sync.WaitGroup) {
 	// If an output folder was specified for json files
 	if *outJSON != "" {
 		if _, err := os.Stat(fmt.Sprintf("./%s", *outJSON)); !os.IsNotExist(err) {
-			go func() {
-				wg.Add(1)
-				err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.json", *outJSON, t.record.Timestamp.Format(time.RFC3339)), jsonRecord, 0644)
-				if err != nil {
-					panic("Could not write to file.")
-				} else {
-					wg.Done()
-				}
-			}()
+			err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.json", *outJSON, t.record.Timestamp.Format(time.RFC3339)), jsonRecord, 0644)
+			if err != nil {
+				panic("Could not write to file.")
+			}
 		} else {
 			panic(fmt.Sprintf("./%s does not exist", *outJSON))
 		}
 		// If not folder specidied, we output to stdout
 	} else {
 		r := bytes.NewReader(jsonRecord)
-		io.Copy(os.Stdout, r)
+		_, err := io.Copy(os.Stdout, r)
+		if err != nil {
+			panic("Could not write to stdout.")
+		}
 	}
 
 	Debug(t.String())
-	wg.Done()
 }
