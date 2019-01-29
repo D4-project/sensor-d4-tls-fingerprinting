@@ -1,8 +1,3 @@
-// Copyright 2012 Google, Inc. All rights reserved.
-//
-// Use of this source code is governed by a BSD-style license
-// that can be found in the LICENSE file in the root of the source
-// tree.
 package main
 
 import (
@@ -36,10 +31,6 @@ import (
 	"github.com/google/gopacket/reassembly"
 )
 
-var maxcount = flag.Int("c", -1, "Only grab this many packets, then exit")
-var decoder = flag.String("decoder", "", "Name of the decoder to use (default: guess from capture)")
-var statsevery = flag.Int("stats", 1000, "Output statistics every N packets")
-var lazy = flag.Bool("lazy", false, "If true, do lazy decoding")
 var nodefrag = flag.Bool("nodefrag", false, "If true, do not do IPv4 defrag")
 var checksum = flag.Bool("checksum", false, "Check TCP checksum")
 var nooptcheck = flag.Bool("nooptcheck", false, "Do not check TCP options (useful to ignore MSS on captures with TSO)")
@@ -57,26 +48,6 @@ var fname = flag.String("r", "", "Filename to read from, overrides -i")
 var outCerts = flag.String("w", "", "Folder to write certificates into")
 var outJSON = flag.String("j", "", "Folder to write certificates into, stdin if not set")
 var jobQ chan TLSSession
-
-var memprofile = flag.String("memprofile", "", "Write memory profile")
-
-var stats struct {
-	ipdefrag            int
-	missedBytes         int
-	pkt                 int
-	sz                  int
-	totalsz             int
-	rejectFsm           int
-	rejectOpt           int
-	rejectConnFsm       int
-	reassembled         int
-	outOfOrderBytes     int
-	outOfOrderPackets   int
-	biggestChunkBytes   int
-	biggestChunkPackets int
-	overlapBytes        int
-	overlapPackets      int
-}
 
 type SessionRecord struct {
 	ServerIP     string
@@ -213,10 +184,8 @@ func (t *tcpStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassem
 	// FSM
 	if !t.tcpstate.CheckState(tcp, dir) {
 		Error("FSM", "%s: Packet rejected by FSM (state:%s)\n", t.ident, t.tcpstate.String())
-		stats.rejectFsm++
 		if !t.fsmerr {
 			t.fsmerr = true
-			stats.rejectConnFsm++
 		}
 		if !*ignorefsmerr {
 			return false
@@ -226,7 +195,6 @@ func (t *tcpStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassem
 	err := t.optchecker.Accept(tcp, ci, dir, nextSeq, start)
 	if err != nil {
 		Error("OptionChecker", "%s: Packet rejected by OptionChecker: %s\n", t.ident, err)
-		stats.rejectOpt++
 		if !*nooptcheck {
 			return false
 		}
@@ -243,47 +211,12 @@ func (t *tcpStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassem
 			accept = false
 		}
 	}
-	if !accept {
-		stats.rejectOpt++
-	}
 	return accept
 }
 
 func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.AssemblerContext) {
-	dir, start, end, skip := sg.Info()
-	length, saved := sg.Lengths()
-	// update stats
-	sgStats := sg.Stats()
-	if skip > 0 {
-		stats.missedBytes += skip
-	}
-	stats.sz += length - saved
-	stats.pkt += sgStats.Packets
-	if sgStats.Chunks > 1 {
-		stats.reassembled++
-	}
-	stats.outOfOrderPackets += sgStats.QueuedPackets
-	stats.outOfOrderBytes += sgStats.QueuedBytes
-	if length > stats.biggestChunkBytes {
-		stats.biggestChunkBytes = length
-	}
-	if sgStats.Packets > stats.biggestChunkPackets {
-		stats.biggestChunkPackets = sgStats.Packets
-	}
-	if sgStats.OverlapBytes != 0 && sgStats.OverlapPackets == 0 {
-		fmt.Printf("bytes:%d, pkts:%d\n", sgStats.OverlapBytes, sgStats.OverlapPackets)
-		panic("Invalid overlap")
-	}
-	stats.overlapBytes += sgStats.OverlapBytes
-	stats.overlapPackets += sgStats.OverlapPackets
-
-	var ident string
-	if dir == reassembly.TCPDirClientToServer {
-		ident = fmt.Sprintf("%v %v(%s): ", t.net, t.transport, dir)
-	} else {
-		ident = fmt.Sprintf("%v %v(%s): ", t.net.Reverse(), t.transport.Reverse(), dir)
-	}
-	Debug("%s: SG reassembled packet with %d bytes (start:%v,end:%v,skip:%d,saved:%d,nb:%d,%d,overlap:%d,%d)\n", ident, length, start, end, skip, saved, sgStats.Packets, sgStats.Chunks, sgStats.OverlapBytes, sgStats.OverlapPackets)
+	_, _, _, skip := sg.Info()
+	length, _ := sg.Lengths()
 	if skip == -1 && *allowmissinginit {
 		// this is allowed
 	} else if skip != 0 {
@@ -488,7 +421,6 @@ func main() {
 		log.Fatal("No eth decoder")
 	}
 	source := gopacket.NewPacketSource(handle, dec)
-	source.Lazy = *lazy
 	source.NoCopy = true
 	Info("Starting to read packets\n")
 	count := 0
@@ -534,7 +466,6 @@ func main() {
 				continue // ip packet fragment, we don't have whole packet yet.
 			}
 			if newip4.Length != l {
-				stats.ipdefrag++
 				Debug("Decoding re-assembled packet: %s\n", newip4.NextLayerType())
 				pb, ok := packet.(gopacket.PacketBuilder)
 				if !ok {
@@ -557,13 +488,7 @@ func main() {
 			c := Context{
 				CaptureInfo: packet.Metadata().CaptureInfo,
 			}
-			stats.totalsz += len(tcp.Payload)
 			assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
-		}
-		if count%*statsevery == 0 {
-			ref := packet.Metadata().CaptureInfo.Timestamp
-			flushed, closed := assembler.FlushWithOptions(reassembly.FlushOptions{T: ref.Add(-timeout), TC: ref.Add(-closeTimeout)})
-			Debug("Forced flush: %d flushed, %d closed (%s)", flushed, closed, ref)
 		}
 
 		var done bool
