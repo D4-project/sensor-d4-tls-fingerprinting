@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"crypto/md5"
 	"crypto/x509"
+
+	// TODO consider
+	//"github.com/google/certificate-transparency-go/x509"
 	"encoding/hex"
 	"encoding/json"
 	"flag"

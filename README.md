@@ -1,7 +1,8 @@
 # sensor-d4-tls-fingerprinting
 Extracts TLS certificates from pcap files or network interfaces (tcpreassembly is done thanks to gopacket), fingerprints TLS client/server interactions with ja3/ja3s and print output in JSON form.
 # Use
-This project is currently in its very early stage and relies mainly on a customized version of ![gopacket](http://github.com/google/gopacket "gopacket link") that will be the subject of a pull request later on.
+This project is currently in its very early stage and relies on a customized version of ![gopacket](http://github.com/google/gopacket "gopacket link").
+Check the list of issues.
 ## Install dependencies & go get
 ``` shell
 $go get github.com/gallypette/gopacket
