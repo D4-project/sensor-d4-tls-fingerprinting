@@ -6,6 +6,7 @@ This project is currently in its very early stage and should not be used in prod
 ## Install dependencies & go get
 ``` shell
 $go get github.com/google/gopacket
+$go get github.com/glaslos/tlsh 
 $go get github.com/D4-project/sensor-d4-tls-fingerprinting
 ```
 make allows to compile for amd64 and arm ATM.

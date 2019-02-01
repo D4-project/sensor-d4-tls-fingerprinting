@@ -21,14 +21,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/glaslos/tlsh"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/examples/util"
 	"github.com/google/gopacket/ip4defrag"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/reassembly"
-
-	// My Extended TLS layer
 
 	"github.com/D4-project/sensor-d4-tls-fingerprinting/etls"
 )
@@ -59,7 +58,7 @@ type SessionRecord struct {
 	ServerPort   string
 	ClientIP     string
 	ClientPort   string
-	TLSHDigest   string
+	TLSH         string
 	Timestamp    time.Time
 	JA3          string
 	JA3Digest    string
@@ -94,6 +93,7 @@ func (t *TLSSession) String() string {
 	buf.WriteString(fmt.Sprintf("Time: %d\n", t.record.Timestamp))
 	buf.WriteString(fmt.Sprintf("Client: %v:%v\n", t.record.ClientIP, t.record.ClientPort))
 	buf.WriteString(fmt.Sprintf("Server: %v:%v\n", t.record.ServerIP, t.record.ServerPort))
+	buf.WriteString(fmt.Sprintf("TLSH: %q\n", t.record.TLSH))
 	buf.WriteString(fmt.Sprintf("ja3: %q\n", t.record.JA3))
 	buf.WriteString(fmt.Sprintf("ja3 Digest: %q\n", t.record.JA3Digest))
 	buf.WriteString(fmt.Sprintf("ja3s: %q\n", t.record.JA3S))
@@ -263,7 +263,6 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 							t.tlsSession.gatherJa3s()
 						// Server Certificate
 						case 11:
-							//certs := make([]*x509.Certificate, len(tlsrecord.TLSHandshakeCertificate.Certificates))
 							for _, asn1Data := range tlsrecord.ETLSHandshakeCertificate.Certificates {
 								cert, err := x509.ParseCertificate(asn1Data)
 								if err != nil {
@@ -272,6 +271,10 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 									t.tlsSession.record.Certificates = append(t.tlsSession.record.Certificates, cert)
 								}
 							}
+							// We compute ja3jl
+							out, _ := tlsh.HashBytes(t.tlsSession.record.ja3jl())
+							t.tlsSession.record.TLSH = out.String()
+
 							// If we get a cert, we consider the handshake as finished and ready to ship to D4
 							queueSession(t.tlsSession)
 						default:
@@ -292,6 +295,18 @@ func getIPPorts(t *tcpStream) (string, string, string, string) {
 	cp := tmp[0]
 	ps := tmp[1]
 	return ipc, ips, cp, ps
+}
+
+func (sr *SessionRecord) ja3jl() []byte {
+	buf := sr.JA3 + sr.JA3S
+	for _, cert := range sr.Certificates {
+		buf += fmt.Sprintf("%q", cert.Issuer) + fmt.Sprintf("%q", cert.Subject)
+	}
+	buf = strings.Replace(buf, "-", "", -1)
+	buf = strings.Replace(buf, ",", "", -1)
+	buf = strings.Replace(buf, "\"", "", -1)
+
+	return []byte(buf)
 }
 
 func (ts *TLSSession) gatherJa3s() bool {
