@@ -24,14 +24,13 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/examples/util"
 	"github.com/google/gopacket/ip4defrag"
-
-	// ATM add a fork to gopacket like this to pull my TLS code:
-	// $go get github.com/gallypette/gopacket
-	// $cd $GOPATH/src/github.com/google/gopacket
-	// $git remote add fork github.com/gallypette/gopacket
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/reassembly"
+
+	// My Extended TLS layer
+
+	"github.com/D4-project/sensor-d4-tls-fingerprinting/etls"
 )
 
 var nodefrag = flag.Bool("nodefrag", false, "If true, do not do IPv4 defrag")
@@ -46,6 +45,9 @@ var quiet = flag.Bool("quiet", false, "Be quiet regarding errors")
 // capture
 var iface = flag.String("i", "eth0", "Interface to read packets from")
 var fname = flag.String("r", "", "Filename to read from, overrides -i")
+
+// decoding
+//var LayerTypeETLS gopacket.LayerType
 
 // writing
 var outCerts = flag.String("w", "", "Folder to write certificates into")
@@ -68,7 +70,7 @@ type SessionRecord struct {
 
 type TLSSession struct {
 	record   SessionRecord
-	tlsHdskR layers.TLSHandshakeRecord
+	tlsHdskR etls.ETLSHandshakeRecord
 }
 
 var grease = map[uint16]bool{
@@ -231,25 +233,25 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 		if length > 0 {
 			// We can't rely on TLS length field has there can be several successive Record Layers
 			// We attempt to decode, and if it fails, we keep the slice for later.
-			// Now we attempts TLS decoding
-			tls := &layers.TLS{}
+			// Now we attempts Extended TLS decoding
+			tls := &etls.ETLS{}
 			var decoded []gopacket.LayerType
+			p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
+			p.DecodingLayerParserOptions.IgnoreUnsupported = true
 			// First we check if the packet is fragmented
-			p := gopacket.NewDecodingLayerParser(layers.LayerTypeTLS, tls)
 			err := p.DecodeLayers(data, &decoded)
 			if err != nil {
-				//			Error("TLS-parser", "Failed to decode TLS: %v\n", err)
-				//				Debug("RAW %s\n", hex.Dump(data))
+				// If it's malformed as it we keep for next round
 				sg.KeepFrom(0)
 			} else {
 				//Debug("TLS: %s\n", gopacket.LayerDump(tls))
 				//		Debug("TLS: %s\n", gopacket.LayerGoString(tls))
 				if tls.Handshake != nil {
 					for _, tlsrecord := range tls.Handshake {
-						switch tlsrecord.TLSHandshakeMsgType {
+						switch tlsrecord.ETLSHandshakeMsgType {
 						// Client Hello
 						case 1:
-							t.tlsSession.tlsHdskR.TLSHandshakeClientHello = tlsrecord.TLSHandshakeClientHello
+							t.tlsSession.tlsHdskR.ETLSHandshakeClientHello = tlsrecord.ETLSHandshakeClientHello
 							t.tlsSession.record.ClientIP, t.tlsSession.record.ServerIP, t.tlsSession.record.ClientPort, t.tlsSession.record.ServerPort = getIPPorts(t)
 							// Set up first seen
 							info := sg.CaptureInfo(0)
@@ -257,12 +259,12 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 							t.tlsSession.gatherJa3()
 						// Server Hello
 						case 2:
-							t.tlsSession.tlsHdskR.TLSHandshakeServerHello = tlsrecord.TLSHandshakeServerHello
+							t.tlsSession.tlsHdskR.ETLSHandshakeServerHello = tlsrecord.ETLSHandshakeServerHello
 							t.tlsSession.gatherJa3s()
 						// Server Certificate
 						case 11:
 							//certs := make([]*x509.Certificate, len(tlsrecord.TLSHandshakeCertificate.Certificates))
-							for _, asn1Data := range tlsrecord.TLSHandshakeCertificate.Certificates {
+							for _, asn1Data := range tlsrecord.ETLSHandshakeCertificate.Certificates {
 								cert, err := x509.ParseCertificate(asn1Data)
 								if err != nil {
 									panic("tls: failed to parse certificate from server: " + err.Error())
@@ -294,21 +296,21 @@ func getIPPorts(t *tcpStream) (string, string, string, string) {
 
 func (ts *TLSSession) gatherJa3s() bool {
 	var buf []byte
-	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.TLSHandshakeServerHello.Vers), 10)
+	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.ETLSHandshakeServerHello.Vers), 10)
 	// byte (44) is ","
 	buf = append(buf, byte(44))
 
 	// If there are Cipher Suites
-	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.TLSHandshakeServerHello.CipherSuite), 10)
+	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.ETLSHandshakeServerHello.CipherSuite), 10)
 	buf = append(buf, byte(44))
 
 	// If there are extensions
-	if len(ts.tlsHdskR.TLSHandshakeServerHello.AllExtensions) > 0 {
-		for i, e := range ts.tlsHdskR.TLSHandshakeServerHello.AllExtensions {
+	if len(ts.tlsHdskR.ETLSHandshakeServerHello.AllExtensions) > 0 {
+		for i, e := range ts.tlsHdskR.ETLSHandshakeServerHello.AllExtensions {
 			// TODO check this grease thingy
 			if grease[uint16(e)] == false {
 				buf = strconv.AppendInt(buf, int64(e), 10)
-				if (i + 1) < len(ts.tlsHdskR.TLSHandshakeServerHello.AllExtensions) {
+				if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeServerHello.AllExtensions) {
 					// byte(45) is "-"
 					buf = append(buf, byte(45))
 				}
@@ -325,16 +327,16 @@ func (ts *TLSSession) gatherJa3s() bool {
 
 func (ts *TLSSession) gatherJa3() bool {
 	var buf []byte
-	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.TLSHandshakeClientHello.Vers), 10)
+	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.ETLSHandshakeClientHello.Vers), 10)
 	// byte (44) is ","
 	buf = append(buf, byte(44))
 
 	// If there are Cipher Suites
-	if len(ts.tlsHdskR.TLSHandshakeClientHello.CipherSuites) > 0 {
-		for i, cs := range ts.tlsHdskR.TLSHandshakeClientHello.CipherSuites {
+	if len(ts.tlsHdskR.ETLSHandshakeClientHello.CipherSuites) > 0 {
+		for i, cs := range ts.tlsHdskR.ETLSHandshakeClientHello.CipherSuites {
 			buf = strconv.AppendInt(buf, int64(cs), 10)
 			// byte(45) is "-"
-			if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.CipherSuites) {
+			if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.CipherSuites) {
 				buf = append(buf, byte(45))
 			}
 		}
@@ -342,12 +344,12 @@ func (ts *TLSSession) gatherJa3() bool {
 	buf = append(buf, byte(44))
 
 	// If there are extensions
-	if len(ts.tlsHdskR.TLSHandshakeClientHello.AllExtensions) > 0 {
-		for i, e := range ts.tlsHdskR.TLSHandshakeClientHello.AllExtensions {
+	if len(ts.tlsHdskR.ETLSHandshakeClientHello.AllExtensions) > 0 {
+		for i, e := range ts.tlsHdskR.ETLSHandshakeClientHello.AllExtensions {
 			// TODO check this grease thingy
 			if grease[uint16(e)] == false {
 				buf = strconv.AppendInt(buf, int64(e), 10)
-				if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.AllExtensions) {
+				if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.AllExtensions) {
 					buf = append(buf, byte(45))
 				}
 			}
@@ -356,10 +358,10 @@ func (ts *TLSSession) gatherJa3() bool {
 	buf = append(buf, byte(44))
 
 	// If there are Supported Curves
-	if len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedCurves) > 0 {
-		for i, cs := range ts.tlsHdskR.TLSHandshakeClientHello.SupportedCurves {
+	if len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedCurves) > 0 {
+		for i, cs := range ts.tlsHdskR.ETLSHandshakeClientHello.SupportedCurves {
 			buf = strconv.AppendInt(buf, int64(cs), 10)
-			if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedCurves) {
+			if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedCurves) {
 				buf = append(buf, byte(45))
 			}
 		}
@@ -367,10 +369,10 @@ func (ts *TLSSession) gatherJa3() bool {
 	buf = append(buf, byte(44))
 
 	// If there are Supported Points
-	if len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedPoints) > 0 {
-		for i, cs := range ts.tlsHdskR.TLSHandshakeClientHello.SupportedPoints {
+	if len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedPoints) > 0 {
+		for i, cs := range ts.tlsHdskR.ETLSHandshakeClientHello.SupportedPoints {
 			buf = strconv.AppendInt(buf, int64(cs), 10)
-			if (i + 1) < len(ts.tlsHdskR.TLSHandshakeClientHello.SupportedPoints) {
+			if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedPoints) {
 				buf = append(buf, byte(45))
 			}
 		}
