@@ -2,13 +2,10 @@ package main
 
 import (
 	"bytes"
-	"crypto/md5"
-	"crypto/sha256"
-	"crypto/x509"
 
 	// TODO consider
 	//"github.com/google/certificate-transparency-go/x509"
-	"encoding/hex"
+
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,12 +14,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/glaslos/tlsh"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/examples/util"
 	"github.com/google/gopacket/ip4defrag"
@@ -30,6 +25,7 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/reassembly"
 
+	"github.com/D4-project/sensor-d4-tls-fingerprinting/d4tls"
 	"github.com/D4-project/sensor-d4-tls-fingerprinting/etls"
 )
 
@@ -52,38 +48,7 @@ var fname = flag.String("r", "", "Filename to read from, overrides -i")
 // writing
 var outCerts = flag.String("w", "", "Folder to write certificates into")
 var outJSON = flag.String("j", "", "Folder to write certificates into, stdin if not set")
-var jobQ chan TLSSession
-
-type CertMapElm struct {
-	CertHash string
-	*x509.Certificate
-}
-
-type SessionRecord struct {
-	ServerIP     string
-	ServerPort   string
-	ClientIP     string
-	ClientPort   string
-	TLSH         string
-	Timestamp    time.Time
-	JA3          string
-	JA3Digest    string
-	JA3S         string
-	JA3SDigest   string
-	Certificates []CertMapElm
-}
-
-type TLSSession struct {
-	record   SessionRecord
-	tlsHdskR etls.ETLSHandshakeRecord
-}
-
-var grease = map[uint16]bool{
-	0x0a0a: true, 0x1a1a: true, 0x2a2a: true, 0x3a3a: true,
-	0x4a4a: true, 0x5a5a: true, 0x6a6a: true, 0x7a7a: true,
-	0x8a8a: true, 0x9a9a: true, 0xaaaa: true, 0xbaba: true,
-	0xcaca: true, 0xdada: true, 0xeaea: true, 0xfafa: true,
-}
+var jobQ chan d4tls.TLSSession
 
 const closeTimeout time.Duration = time.Hour * 24 // Closing inactive: TODO: from CLI
 const timeout time.Duration = time.Minute * 5     // Pending bytes: TODO: from CLI
@@ -92,27 +57,6 @@ var outputLevel int
 var errorsMap map[string]uint
 var errorsMapMutex sync.Mutex
 var errors uint
-
-func (t *TLSSession) String() string {
-	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("---------------SESSION START-------------------\n"))
-	buf.WriteString(fmt.Sprintf("Time: %d\n", t.record.Timestamp))
-	buf.WriteString(fmt.Sprintf("Client: %v:%v\n", t.record.ClientIP, t.record.ClientPort))
-	buf.WriteString(fmt.Sprintf("Server: %v:%v\n", t.record.ServerIP, t.record.ServerPort))
-	buf.WriteString(fmt.Sprintf("TLSH: %q\n", t.record.TLSH))
-	buf.WriteString(fmt.Sprintf("ja3: %q\n", t.record.JA3))
-	buf.WriteString(fmt.Sprintf("ja3 Digest: %q\n", t.record.JA3Digest))
-	buf.WriteString(fmt.Sprintf("ja3s: %q\n", t.record.JA3S))
-	buf.WriteString(fmt.Sprintf("ja3s Digest: %q\n", t.record.JA3SDigest))
-	for _, certMe := range t.record.Certificates {
-		buf.WriteString(fmt.Sprintf("Certificate Issuer: %q\n", certMe.Certificate.Issuer))
-		buf.WriteString(fmt.Sprintf("Certificate Subject: %q\n", certMe.Certificate.Subject))
-		buf.WriteString(fmt.Sprintf("Certificate is CA: %t\n", certMe.Certificate.IsCA))
-		buf.WriteString(fmt.Sprintf("Certificate SHA256: %t\n", certMe.CertHash))
-	}
-	buf.WriteString(fmt.Sprintf("---------------SESSION  END--------------------\n"))
-	return buf.String()
-}
 
 // Too bad for perf that a... is evaluated
 func Error(t string, s string, a ...interface{}) {
@@ -155,6 +99,7 @@ func (factory *tcpStreamFactory) New(net, transport gopacket.Flow, tcp *layers.T
 		tcpstate:   reassembly.NewTCPSimpleFSM(fsmOptions),
 		ident:      fmt.Sprintf("%s:%s", net, transport),
 		optchecker: reassembly.NewTCPOptionCheck(),
+		tlsSession: d4tls.TLSSession{},
 	}
 	return stream
 }
@@ -188,7 +133,7 @@ type tcpStream struct {
 	reversed       bool
 	urls           []string
 	ident          string
-	tlsSession     TLSSession
+	tlsSession     d4tls.TLSSession
 	sync.Mutex
 }
 
@@ -258,32 +203,19 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 						switch tlsrecord.ETLSHandshakeMsgType {
 						// Client Hello
 						case 1:
-							t.tlsSession.tlsHdskR.ETLSHandshakeClientHello = tlsrecord.ETLSHandshakeClientHello
-							t.tlsSession.record.ClientIP, t.tlsSession.record.ServerIP, t.tlsSession.record.ClientPort, t.tlsSession.record.ServerPort = getIPPorts(t)
-							// Set up first seen
 							info := sg.CaptureInfo(0)
-							t.tlsSession.record.Timestamp = info.Timestamp
-							t.tlsSession.gatherJa3()
+							cip, sip, cp, sp := getIPPorts(t)
+							t.tlsSession.PopulateClientHello(tlsrecord.ETLSHandshakeClientHello, cip, sip, cp, sp, info.Timestamp)
+							t.tlsSession.D4Fingerprinting("ja3")
 						// Server Hello
 						case 2:
-							t.tlsSession.tlsHdskR.ETLSHandshakeServerHello = tlsrecord.ETLSHandshakeServerHello
-							t.tlsSession.gatherJa3s()
+							t.tlsSession.PopulateServerHello(tlsrecord.ETLSHandshakeServerHello)
+							t.tlsSession.D4Fingerprinting("ja3s")
 						// Server Certificate
 						case 11:
-							for _, asn1Data := range tlsrecord.ETLSHandshakeCertificate.Certificates {
-								cert, err := x509.ParseCertificate(asn1Data)
-								if err != nil {
-									Error("tls", "Failed to parse certificate from server: %x", err)
-								} else {
-									h := sha256.New()
-									h.Write(cert.Raw)
-									t.tlsSession.record.Certificates = append(t.tlsSession.record.Certificates, CertMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))})
-								}
-							}
-							// We compute ja3jl
-							out, _ := tlsh.HashBytes(t.tlsSession.record.ja3jl())
-							t.tlsSession.record.TLSH = out.String()
+							t.tlsSession.PopulateCertificate(tlsrecord.ETLSHandshakeCertificate)
 
+							t.tlsSession.D4Fingerprinting("tlsh")
 							// If we get a cert, we consider the handshake as finished and ready to ship to D4
 							queueSession(t.tlsSession)
 						default:
@@ -304,107 +236,6 @@ func getIPPorts(t *tcpStream) (string, string, string, string) {
 	cp := tmp[0]
 	ps := tmp[1]
 	return ipc, ips, cp, ps
-}
-
-func (sr *SessionRecord) ja3jl() []byte {
-	buf := sr.JA3 + sr.JA3S
-	for _, cert := range sr.Certificates {
-		buf += fmt.Sprintf("%q", cert.Issuer) + fmt.Sprintf("%q", cert.Subject)
-	}
-	buf = strings.Replace(buf, "-", "", -1)
-	buf = strings.Replace(buf, ",", "", -1)
-	buf = strings.Replace(buf, "\"", "", -1)
-
-	return []byte(buf)
-}
-
-func (ts *TLSSession) gatherJa3s() bool {
-	var buf []byte
-	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.ETLSHandshakeServerHello.Vers), 10)
-	// byte (44) is ","
-	buf = append(buf, byte(44))
-
-	// If there are Cipher Suites
-	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.ETLSHandshakeServerHello.CipherSuite), 10)
-	buf = append(buf, byte(44))
-
-	// If there are extensions
-	if len(ts.tlsHdskR.ETLSHandshakeServerHello.AllExtensions) > 0 {
-		for i, e := range ts.tlsHdskR.ETLSHandshakeServerHello.AllExtensions {
-			// TODO check this grease thingy
-			if grease[uint16(e)] == false {
-				buf = strconv.AppendInt(buf, int64(e), 10)
-				if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeServerHello.AllExtensions) {
-					// byte(45) is "-"
-					buf = append(buf, byte(45))
-				}
-			}
-		}
-	}
-
-	ts.record.JA3S = string(buf)
-	tmp := md5.Sum(buf)
-	ts.record.JA3SDigest = hex.EncodeToString(tmp[:])
-
-	return true
-}
-
-func (ts *TLSSession) gatherJa3() bool {
-	var buf []byte
-	buf = strconv.AppendInt(buf, int64(ts.tlsHdskR.ETLSHandshakeClientHello.Vers), 10)
-	// byte (44) is ","
-	buf = append(buf, byte(44))
-
-	// If there are Cipher Suites
-	if len(ts.tlsHdskR.ETLSHandshakeClientHello.CipherSuites) > 0 {
-		for i, cs := range ts.tlsHdskR.ETLSHandshakeClientHello.CipherSuites {
-			buf = strconv.AppendInt(buf, int64(cs), 10)
-			// byte(45) is "-"
-			if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.CipherSuites) {
-				buf = append(buf, byte(45))
-			}
-		}
-	}
-	buf = append(buf, byte(44))
-
-	// If there are extensions
-	if len(ts.tlsHdskR.ETLSHandshakeClientHello.AllExtensions) > 0 {
-		for i, e := range ts.tlsHdskR.ETLSHandshakeClientHello.AllExtensions {
-			// TODO check this grease thingy
-			if grease[uint16(e)] == false {
-				buf = strconv.AppendInt(buf, int64(e), 10)
-				if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.AllExtensions) {
-					buf = append(buf, byte(45))
-				}
-			}
-		}
-	}
-	buf = append(buf, byte(44))
-
-	// If there are Supported Curves
-	if len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedCurves) > 0 {
-		for i, cs := range ts.tlsHdskR.ETLSHandshakeClientHello.SupportedCurves {
-			buf = strconv.AppendInt(buf, int64(cs), 10)
-			if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedCurves) {
-				buf = append(buf, byte(45))
-			}
-		}
-	}
-	buf = append(buf, byte(44))
-
-	// If there are Supported Points
-	if len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedPoints) > 0 {
-		for i, cs := range ts.tlsHdskR.ETLSHandshakeClientHello.SupportedPoints {
-			buf = strconv.AppendInt(buf, int64(cs), 10)
-			if (i + 1) < len(ts.tlsHdskR.ETLSHandshakeClientHello.SupportedPoints) {
-				buf = append(buf, byte(45))
-			}
-		}
-	}
-	ts.record.JA3 = string(buf)
-	tmp := md5.Sum(buf)
-	ts.record.JA3Digest = hex.EncodeToString(tmp[:])
-	return true
 }
 
 func (t *tcpStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
@@ -465,7 +296,7 @@ func main() {
 	signal.Notify(signalChan, os.Interrupt)
 
 	// Job chan to hold Completed sessions to write
-	jobQ = make(chan TLSSession, 100)
+	jobQ = make(chan d4tls.TLSSession, 100)
 	cancelC := make(chan string)
 
 	// We start a worker to send the processed TLS connection the outside world
@@ -543,7 +374,7 @@ func main() {
 	w.Wait()
 }
 
-func processCompletedSession(jobQ <-chan TLSSession, w *sync.WaitGroup) {
+func processCompletedSession(jobQ <-chan d4tls.TLSSession, w *sync.WaitGroup) {
 	for {
 		tlss, more := <-jobQ
 		if more {
@@ -556,7 +387,7 @@ func processCompletedSession(jobQ <-chan TLSSession, w *sync.WaitGroup) {
 }
 
 // Tries to enqueue or false
-func queueSession(t TLSSession) bool {
+func queueSession(t d4tls.TLSSession) bool {
 	select {
 	case jobQ <- t:
 		return true
@@ -565,14 +396,14 @@ func queueSession(t TLSSession) bool {
 	}
 }
 
-func output(t TLSSession) {
+func output(t d4tls.TLSSession) {
 
-	jsonRecord, _ := json.MarshalIndent(t.record, "", "    ")
+	jsonRecord, _ := json.MarshalIndent(t.Record, "", "    ")
 
 	// If an output folder was specified for certificates
 	if *outCerts != "" {
 		if _, err := os.Stat(fmt.Sprintf("./%s", *outCerts)); !os.IsNotExist(err) {
-			for _, certMe := range t.record.Certificates {
+			for _, certMe := range t.Record.Certificates {
 				err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.crt", *outCerts, certMe.CertHash), certMe.Certificate.Raw, 0644)
 				if err != nil {
 					panic("Could not write to file.")
@@ -586,7 +417,7 @@ func output(t TLSSession) {
 	// If an output folder was specified for json files
 	if *outJSON != "" {
 		if _, err := os.Stat(fmt.Sprintf("./%s", *outJSON)); !os.IsNotExist(err) {
-			err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.json", *outJSON, t.record.Timestamp.Format(time.RFC3339)), jsonRecord, 0644)
+			err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.json", *outJSON, t.Record.Timestamp.Format(time.RFC3339)), jsonRecord, 0644)
 			if err != nil {
 				panic("Could not write to file.")
 			}

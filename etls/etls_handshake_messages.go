@@ -12,7 +12,7 @@ type handshakeMessage interface {
 	unmarshal([]byte) bool
 }
 
-type clientHelloMsg struct {
+type ClientHelloMsg struct {
 	raw                          []byte
 	extensions                   map[Extension]uint16
 	AllExtensions                []uint16
@@ -35,7 +35,7 @@ type clientHelloMsg struct {
 	alpnProtocols                []string
 }
 
-func (m *clientHelloMsg) unmarshal(data []byte) bool {
+func (m *ClientHelloMsg) unmarshal(data []byte) bool {
 	if len(data) < 42 {
 		return false
 	}
@@ -158,7 +158,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 	return true
 }
 
-type serverHelloMsg struct {
+type ServerHelloMsg struct {
 	raw                          []byte
 	extensions                   map[Extension]uint16
 	AllExtensions                []uint16
@@ -177,7 +177,7 @@ type serverHelloMsg struct {
 	alpnProtocol                 string
 }
 
-func (m *serverHelloMsg) unmarshal(data []byte) bool {
+func (m *ServerHelloMsg) unmarshal(data []byte) bool {
 	if len(data) < 42 {
 		return false
 	}
@@ -327,12 +327,12 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 	return true
 }
 
-type certificateMsg struct {
+type CertificateMsg struct {
 	raw          []byte
 	Certificates [][]byte
 }
 
-func (m *certificateMsg) unmarshal(data []byte) bool {
+func (m *CertificateMsg) unmarshal(data []byte) bool {
 	if len(data) < 7 {
 		return false
 	}

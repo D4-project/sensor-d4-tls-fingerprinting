@@ -14,9 +14,9 @@ import (
 type ETLSHandshakeRecord struct {
 	ETLSRecordHeader
 	ETLSHandshakeMsgType     uint8
-	ETLSHandshakeServerHello *serverHelloMsg
-	ETLSHandshakeClientHello *clientHelloMsg
-	ETLSHandshakeCertificate *certificateMsg
+	ETLSHandshakeServerHello *ServerHelloMsg
+	ETLSHandshakeClientHello *ClientHelloMsg
+	ETLSHandshakeCertificate *CertificateMsg
 }
 
 // DecodeFromBytes decodes the slice into the ETLS struct.
@@ -30,15 +30,15 @@ func (t *ETLSHandshakeRecord) decodeFromBytes(h ETLSRecordHeader, data []byte, d
 	switch uint8(data[0]) {
 	case typeClientHello:
 		t.ETLSHandshakeMsgType = typeClientHello
-		t.ETLSHandshakeClientHello = new(clientHelloMsg)
+		t.ETLSHandshakeClientHello = new(ClientHelloMsg)
 		t.ETLSHandshakeClientHello.unmarshal(data)
 	case typeServerHello:
 		t.ETLSHandshakeMsgType = typeServerHello
-		t.ETLSHandshakeServerHello = new(serverHelloMsg)
+		t.ETLSHandshakeServerHello = new(ServerHelloMsg)
 		t.ETLSHandshakeServerHello.unmarshal(data)
 	case typeCertificate:
 		t.ETLSHandshakeMsgType = typeCertificate
-		t.ETLSHandshakeCertificate = new(certificateMsg)
+		t.ETLSHandshakeCertificate = new(CertificateMsg)
 		t.ETLSHandshakeCertificate.unmarshal(data)
 	}
 	// Please see the following url if you are interested into implementing the rest:
