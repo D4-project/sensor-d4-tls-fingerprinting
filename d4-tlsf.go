@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
 	"crypto/x509"
 
 	// TODO consider
@@ -53,6 +54,11 @@ var outCerts = flag.String("w", "", "Folder to write certificates into")
 var outJSON = flag.String("j", "", "Folder to write certificates into, stdin if not set")
 var jobQ chan TLSSession
 
+type CertMapElm struct {
+	CertHash string
+	*x509.Certificate
+}
+
 type SessionRecord struct {
 	ServerIP     string
 	ServerPort   string
@@ -64,7 +70,7 @@ type SessionRecord struct {
 	JA3Digest    string
 	JA3S         string
 	JA3SDigest   string
-	Certificates []*x509.Certificate
+	Certificates []CertMapElm
 }
 
 type TLSSession struct {
@@ -98,10 +104,11 @@ func (t *TLSSession) String() string {
 	buf.WriteString(fmt.Sprintf("ja3 Digest: %q\n", t.record.JA3Digest))
 	buf.WriteString(fmt.Sprintf("ja3s: %q\n", t.record.JA3S))
 	buf.WriteString(fmt.Sprintf("ja3s Digest: %q\n", t.record.JA3SDigest))
-	for _, cert := range t.record.Certificates {
-		buf.WriteString(fmt.Sprintf("Certificate Issuer: %q\n", cert.Issuer))
-		buf.WriteString(fmt.Sprintf("Certificate Subject: %q\n", cert.Subject))
-		buf.WriteString(fmt.Sprintf("Certificate is CA: %t\n", cert.IsCA))
+	for _, certMe := range t.record.Certificates {
+		buf.WriteString(fmt.Sprintf("Certificate Issuer: %q\n", certMe.Certificate.Issuer))
+		buf.WriteString(fmt.Sprintf("Certificate Subject: %q\n", certMe.Certificate.Subject))
+		buf.WriteString(fmt.Sprintf("Certificate is CA: %t\n", certMe.Certificate.IsCA))
+		buf.WriteString(fmt.Sprintf("Certificate SHA256: %t\n", certMe.CertHash))
 	}
 	buf.WriteString(fmt.Sprintf("---------------SESSION  END--------------------\n"))
 	return buf.String()
@@ -266,9 +273,11 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 							for _, asn1Data := range tlsrecord.ETLSHandshakeCertificate.Certificates {
 								cert, err := x509.ParseCertificate(asn1Data)
 								if err != nil {
-									panic("tls: failed to parse certificate from server: " + err.Error())
+									Error("tls", "Failed to parse certificate from server: %x", err)
 								} else {
-									t.tlsSession.record.Certificates = append(t.tlsSession.record.Certificates, cert)
+									h := sha256.New()
+									h.Write(cert.Raw)
+									t.tlsSession.record.Certificates = append(t.tlsSession.record.Certificates, CertMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))})
 								}
 							}
 							// We compute ja3jl
@@ -563,8 +572,8 @@ func output(t TLSSession) {
 	// If an output folder was specified for certificates
 	if *outCerts != "" {
 		if _, err := os.Stat(fmt.Sprintf("./%s", *outCerts)); !os.IsNotExist(err) {
-			for _, cert := range t.record.Certificates {
-				err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.crt", *outCerts, t.record.Timestamp.Format(time.RFC3339)), cert.Raw, 0644)
+			for _, certMe := range t.record.Certificates {
+				err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.crt", *outCerts, certMe.CertHash), certMe.Certificate.Raw, 0644)
 				if err != nil {
 					panic("Could not write to file.")
 				}
