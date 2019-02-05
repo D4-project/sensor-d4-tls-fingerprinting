@@ -183,17 +183,14 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 	data := sg.Fetch(length)
 	if t.isTLS {
 		if length > 0 {
-			// We can't rely on TLS length field has there can be several successive Record Layers
-			// We attempt to decode, and if it fails, we keep the slice for later.
-			// Now we attempts Extended TLS decoding
+			// We attempt to decode TLS
 			tls := &etls.ETLS{}
 			var decoded []gopacket.LayerType
 			p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
 			p.DecodingLayerParserOptions.IgnoreUnsupported = true
-			// First we check if the packet is fragmented
 			err := p.DecodeLayers(data, &decoded)
 			if err != nil {
-				// If it's malformed as it we keep for next round
+				// If it's fragmented we keep for next round
 				sg.KeepFrom(0)
 			} else {
 				//Debug("TLS: %s\n", gopacket.LayerDump(tls))
