@@ -211,5 +211,5 @@ func (t *ETLS) Payload() []byte {
 }
 
 func init() {
-	_ = gopacket.RegisterLayerType(1337, gopacket.LayerTypeMetadata{Name: "ETLS", Decoder: gopacket.DecodeFunc(decodeETLS)})
+	LayerTypeETLS = gopacket.RegisterLayerType(1337, gopacket.LayerTypeMetadata{Name: "ETLS", Decoder: gopacket.DecodeFunc(decodeETLS)})
 }

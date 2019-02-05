@@ -46,6 +46,7 @@ type sessionRecord struct {
 type TLSSession struct {
 	Record          sessionRecord
 	handShakeRecord etls.ETLSHandshakeRecord
+	stage           int
 }
 
 // String returns a string that describes a TLSSession
@@ -72,30 +73,38 @@ func (t *TLSSession) String() string {
 
 // PopulateClientHello takes a pointer to an etls ClientHelloMsg and writes it to the the TLSSession struct
 func (t *TLSSession) PopulateClientHello(h *etls.ClientHelloMsg, cip string, sip string, cp string, sp string, ti time.Time) {
-	t.Record.ClientIP = cip
-	t.Record.ServerIP = sip
-	t.Record.ClientPort = cp
-	t.Record.ServerPort = sp
-	t.Record.Timestamp = ti
-	t.handShakeRecord.ETLSHandshakeClientHello = h
+	if t.stage < 1 {
+		t.Record.ClientIP = cip
+		t.Record.ServerIP = sip
+		t.Record.ClientPort = cp
+		t.Record.ServerPort = sp
+		t.Record.Timestamp = ti
+		t.handShakeRecord.ETLSHandshakeClientHello = h
+		t.stage = 1
+	}
 }
 
 // PopulateServerHello takes a pointer to an etls ServerHelloMsg and writes it to the TLSSession struct
 func (t *TLSSession) PopulateServerHello(h *etls.ServerHelloMsg) {
-	t.handShakeRecord.ETLSHandshakeServerHello = h
+	if t.stage < 2 {
+		t.handShakeRecord.ETLSHandshakeServerHello = h
+		t.stage = 2
+	}
 }
 
 // PopulateCertificate takes a pointer to an etls ServerHelloMsg and writes it to the TLSSession struct
 func (t *TLSSession) PopulateCertificate(c *etls.CertificateMsg) {
-	t.handShakeRecord.ETLSHandshakeCertificate = c
-	for _, asn1Data := range t.handShakeRecord.ETLSHandshakeCertificate.Certificates {
-		cert, err := x509.ParseCertificate(asn1Data)
-		if err != nil {
-			//return err
-		} else {
-			h := sha256.New()
-			h.Write(cert.Raw)
-			t.Record.Certificates = append(t.Record.Certificates, certMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))})
+	if t.stage < 3 {
+		t.handShakeRecord.ETLSHandshakeCertificate = c
+		for _, asn1Data := range t.handShakeRecord.ETLSHandshakeCertificate.Certificates {
+			cert, err := x509.ParseCertificate(asn1Data)
+			if err != nil {
+				//return err
+			} else {
+				h := sha256.New()
+				h.Write(cert.Raw)
+				t.Record.Certificates = append(t.Record.Certificates, certMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))})
+			}
 		}
 	}
 }
