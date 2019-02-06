@@ -145,14 +145,15 @@ func (t *TLSSession) ja3s() bool {
 	// byte (44) is ","
 	buf = append(buf, byte(44))
 
-	// If there are Cipher Suites
-	buf = strconv.AppendInt(buf, int64(t.handShakeRecord.ETLSHandshakeServerHello.CipherSuite), 10)
+	// If the Server Cipher is not in GREASE
+	if grease[uint16(t.handShakeRecord.ETLSHandshakeServerHello.CipherSuite)] == false {
+		buf = strconv.AppendInt(buf, int64(t.handShakeRecord.ETLSHandshakeServerHello.CipherSuite), 10)
+	}
 	buf = append(buf, byte(44))
 
 	// If there are extensions
 	if len(t.handShakeRecord.ETLSHandshakeServerHello.AllExtensions) > 0 {
 		for i, e := range t.handShakeRecord.ETLSHandshakeServerHello.AllExtensions {
-			// TODO check this grease thingy
 			if grease[uint16(e)] == false {
 				buf = strconv.AppendInt(buf, int64(e), 10)
 				if (i + 1) < len(t.handShakeRecord.ETLSHandshakeServerHello.AllExtensions) {
@@ -179,10 +180,12 @@ func (t *TLSSession) ja3() bool {
 	// If there are Cipher Suites
 	if len(t.handShakeRecord.ETLSHandshakeClientHello.CipherSuites) > 0 {
 		for i, cs := range t.handShakeRecord.ETLSHandshakeClientHello.CipherSuites {
-			buf = strconv.AppendInt(buf, int64(cs), 10)
-			// byte(45) is "-"
-			if (i + 1) < len(t.handShakeRecord.ETLSHandshakeClientHello.CipherSuites) {
-				buf = append(buf, byte(45))
+			if grease[uint16(cs)] == false {
+				buf = strconv.AppendInt(buf, int64(cs), 10)
+				// byte(45) is "-"
+				if (i + 1) < len(t.handShakeRecord.ETLSHandshakeClientHello.CipherSuites) {
+					buf = append(buf, byte(45))
+				}
 			}
 		}
 	}
@@ -191,7 +194,6 @@ func (t *TLSSession) ja3() bool {
 	// If there are extensions
 	if len(t.handShakeRecord.ETLSHandshakeClientHello.AllExtensions) > 0 {
 		for i, e := range t.handShakeRecord.ETLSHandshakeClientHello.AllExtensions {
-			// TODO check this grease thingy
 			if grease[uint16(e)] == false {
 				buf = strconv.AppendInt(buf, int64(e), 10)
 				if (i + 1) < len(t.handShakeRecord.ETLSHandshakeClientHello.AllExtensions) {
