@@ -1,15 +1,13 @@
 package d4tls
 
 import (
+	"strings"
 	"testing"
 	"time"
 
-	_ "github.com/D4-project/sensor-d4-tls-fingerprinting/etls"
+	"github.com/D4-project/sensor-d4-tls-fingerprinting/etls"
 	"github.com/google/gopacket"
 )
-
-var tlss = &TLSSession{}
-var tls = etls.ETLS{}
 
 var d4ClientHelloPacket = []byte{
 	0x16, 0x03, 0x01, 0x00, 0x89, 0x01, 0x00, 0x00, 0x85, 0x03, 0x03, 0x49, 0xdd,
@@ -193,18 +191,23 @@ var certificateRecord = d4ServerHelloPacket[94:1456]
 // Server Hello Done[2017:]
 
 func TestJA3(t *testing.T) {
+	var tls = &etls.ETLS{}
+	var tlss = &TLSSession{}
 	var decoded []gopacket.LayerType
-	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, &tls)
+	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
 	err := p.DecodeLayers(d4ClientHelloPacket, &decoded)
 	if err != nil {
 		t.Fail()
 	} else if decoded[0] == etls.LayerTypeETLS {
-		if etls.Handshake != nil {
-			for _, etlsrecord := range etls.Handshake {
+		if tls.Handshake != nil {
+			for _, etlsrecord := range tls.Handshake {
 				if etlsrecord.ETLSHandshakeMsgType == 1 {
-					// Client Hello
-					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeMsgType, "", "", "", "", time.Now())
+					// Populate Client Hello related fields
+					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello, "", "", "", "", time.Now())
 					tlss.D4Fingerprinting("ja3")
+					// TODO check that againt the reference python implementation
+					t.Logf("%v", tlss.Record.JA3)
+					t.Logf("%v", tlss.Record.JA3Digest)
 				}
 			}
 		}
@@ -212,13 +215,176 @@ func TestJA3(t *testing.T) {
 }
 
 func TestJA3s(t *testing.T) {
-
+	var tls = &etls.ETLS{}
+	var tlss = &TLSSession{}
+	var decoded []gopacket.LayerType
+	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
+	err := p.DecodeLayers(serverHello, &decoded)
+	if err != nil {
+		t.Fail()
+	} else if decoded[0] == etls.LayerTypeETLS {
+		if tls.Handshake != nil {
+			for _, etlsrecord := range tls.Handshake {
+				if etlsrecord.ETLSHandshakeMsgType == 2 {
+					// Populate Server Hello related fields
+					tlss.PopulateServerHello(etlsrecord.ETLSHandshakeServerHello)
+					tlss.D4Fingerprinting("ja3s")
+					// TODO check that againt the reference python implementation
+					t.Logf("%v", tlss.Record.JA3S)
+					t.Logf("%v", tlss.Record.JA3SDigest)
+				}
+			}
+		}
+	}
 }
 
 func TestTLSH(t *testing.T) {
-
+	var tls = &etls.ETLS{}
+	var tlss = &TLSSession{}
+	var decoded []gopacket.LayerType
+	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
+	err := p.DecodeLayers(certificateRecord, &decoded)
+	if err != nil {
+		t.Fail()
+	} else if decoded[0] == etls.LayerTypeETLS {
+		if tls.Handshake != nil {
+			for _, etlsrecord := range tls.Handshake {
+				if etlsrecord.ETLSHandshakeMsgType == 11 {
+					// Populate Cert
+					tlss.PopulateCertificate(etlsrecord.ETLSHandshakeCertificate)
+					tlss.D4Fingerprinting("tlsh")
+					// TODO check that againt the reference implementation
+					t.Logf("%v", tlss.Record.TLSH)
+				}
+			}
+		}
+	}
 }
 
-func TestGreaseExclusoin(t *testing.T) {
+func TestGreaseClientHelloExtensionExlusion(t *testing.T) {
+	var tls = &etls.ETLS{}
+	var tlss = &TLSSession{}
+	var decoded []gopacket.LayerType
+	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
+	// Add grease values on an extension
+	d4ClientHelloPacket[82] = 0x0a
+	d4ClientHelloPacket[83] = 0x0a
+	// Set because tests may be ran in any order
+	d4ClientHelloPacket[46] = 0xc0
+	d4ClientHelloPacket[47] = 0x2f
+	err := p.DecodeLayers(d4ClientHelloPacket, &decoded)
 
+	if err != nil {
+		t.Fail()
+	} else if decoded[0] == etls.LayerTypeETLS {
+		if tls.Handshake != nil {
+			for _, etlsrecord := range tls.Handshake {
+				if etlsrecord.ETLSHandshakeMsgType == 1 {
+					// Populate Client Hello related fields
+					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello, "", "", "", "", time.Now())
+					tlss.D4Fingerprinting("ja3")
+					t.Logf("%v", tlss.Record.JA3Digest)
+					if strings.Index(tlss.Record.JA3, "2570") != -1 {
+						t.Logf("GREASE values should not end up in JA3\n")
+						t.Fail()
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestGreaseClientHelloCipherExlusion(t *testing.T) {
+	var tls = &etls.ETLS{}
+	var tlss = &TLSSession{}
+	var decoded []gopacket.LayerType
+	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
+	// Add grease on a cipher suite
+	d4ClientHelloPacket[46] = 0x0a
+	d4ClientHelloPacket[47] = 0x0a
+	// Set because tests may be ran in any order
+	d4ClientHelloPacket[82] = 0x00
+	d4ClientHelloPacket[83] = 0x05
+	err := p.DecodeLayers(d4ClientHelloPacket, &decoded)
+
+	if err != nil {
+		t.Fail()
+	} else if decoded[0] == etls.LayerTypeETLS {
+		if tls.Handshake != nil {
+			for _, etlsrecord := range tls.Handshake {
+				if etlsrecord.ETLSHandshakeMsgType == 1 {
+					// Populate Client Hello related fields
+					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello, "", "", "", "", time.Now())
+					tlss.D4Fingerprinting("ja3")
+					if strings.Index(tlss.Record.JA3, "2570") != -1 {
+						t.Logf("GREASE values should not end up in JA3\n")
+						t.Fail()
+					}
+				}
+			}
+		}
+	}
+}
+func TestGreaseServerHelloExtensionExlusion(t *testing.T) {
+	var tls = &etls.ETLS{}
+	var tlss = &TLSSession{}
+	var decoded []gopacket.LayerType
+	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
+	// Add grease values on an extension
+	d4ServerHelloPacket[81] = 0x0a
+	d4ServerHelloPacket[82] = 0x0a
+	// Set because tests may be ran in any order
+	d4ServerHelloPacket[76] = 0xc0
+	d4ServerHelloPacket[77] = 0x30
+	err := p.DecodeLayers(d4ServerHelloPacket, &decoded)
+	if err != nil {
+		t.Fail()
+	} else if decoded[0] == etls.LayerTypeETLS {
+		if tls.Handshake != nil {
+			for _, etlsrecord := range tls.Handshake {
+				if etlsrecord.ETLSHandshakeMsgType == 2 {
+					// Populate Client Hello related fields
+					tlss.PopulateServerHello(etlsrecord.ETLSHandshakeServerHello)
+					tlss.D4Fingerprinting("ja3s")
+					t.Logf("%v", tlss.Record.JA3S)
+					if strings.Index(tlss.Record.JA3S, "2570") != -1 {
+						t.Logf("GREASE values should not end up in JA3s\n")
+						t.Fail()
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestGreaseServerHelloCipherExlusion(t *testing.T) {
+	var tls = &etls.ETLS{}
+	var tlss = &TLSSession{}
+	var decoded []gopacket.LayerType
+	p := gopacket.NewDecodingLayerParser(etls.LayerTypeETLS, tls)
+	// Add grease values on an extension
+	d4ServerHelloPacket[81] = 0xff
+	d4ServerHelloPacket[82] = 0x01
+	// Set because tests may be ran in any order
+	d4ServerHelloPacket[76] = 0x0a
+	d4ServerHelloPacket[77] = 0x0a
+	err := p.DecodeLayers(d4ServerHelloPacket, &decoded)
+	if err != nil {
+		t.Fail()
+	} else if decoded[0] == etls.LayerTypeETLS {
+		if tls.Handshake != nil {
+			for _, etlsrecord := range tls.Handshake {
+				if etlsrecord.ETLSHandshakeMsgType == 2 {
+					// Populate Client Hello related fields
+					tlss.PopulateServerHello(etlsrecord.ETLSHandshakeServerHello)
+					tlss.D4Fingerprinting("ja3s")
+					t.Logf("%v", tlss.Record.JA3S)
+					if strings.Index(tlss.Record.JA3S, "2570") != -1 {
+						t.Logf("GREASE values should not end up in JA3s\n")
+						t.Fail()
+					}
+				}
+			}
+		}
+	}
 }
