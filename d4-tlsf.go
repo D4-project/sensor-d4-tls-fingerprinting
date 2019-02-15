@@ -265,12 +265,7 @@ func main() {
 		}
 	}
 
-	var dec gopacket.Decoder
-	var ok bool
-	if dec, ok = gopacket.DecodersByLayerName["Ethernet"]; !ok {
-		log.Fatal("No eth decoder")
-	}
-	source := gopacket.NewPacketSource(handle, dec)
+	source := gopacket.NewPacketSource(handle, handle.LinkType())
 	source.NoCopy = true
 	Info("Starting to read packets\n")
 	count := 0
@@ -294,52 +289,77 @@ func main() {
 	w.Add(1)
 	go processCompletedSession(jobQ, &w)
 
+	var eth layers.Ethernet
+	var ip4 layers.IPv4
+	var ip6 layers.IPv6
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6)
+	decoded := []gopacket.LayerType{}
+
 	for packet := range source.Packets() {
 		count++
 		Debug("PACKET #%d\n", count)
+
 		data := packet.Data()
+
+		if err := parser.DecodeLayers(data, &decoded); err != nil {
+			// Well it sures complaing about not knowing how to decode TCP
+		}
+
+		fmt.Printf("%s\n", ip4.SrcIP)
+		//		fmt.Printf("%s", hex.Dump(decoded))
+
+		for _, layerType := range decoded {
+			switch layerType {
+			case layers.LayerTypeIPv6:
+				fmt.Println("    IP6 ", ip6.SrcIP, ip6.DstIP)
+			case layers.LayerTypeIPv4:
+
+				fmt.Println("    IP4 ", ip4.SrcIP, ip4.DstIP)
+				// defrag the IPv4 packet if required
+				if !*nodefrag {
+					ip4Layer := packet.Layer(layers.LayerTypeIPv4)
+					if ip4Layer == nil {
+						continue
+					}
+					ip4 := ip4Layer.(*layers.IPv4)
+					l := ip4.Length
+					newip4, err := defragger.DefragIPv4(ip4)
+					if err != nil {
+						log.Fatalln("Error while de-fragmenting", err)
+					} else if newip4 == nil {
+						Debug("Fragment...\n")
+						continue // ip packet fragment, we don't have whole packet yet.
+					}
+					if newip4.Length != l {
+						Debug("Decoding re-assembled packet: %s\n", newip4.NextLayerType())
+						pb, ok := packet.(gopacket.PacketBuilder)
+						if !ok {
+							panic("Not a PacketBuilder")
+						}
+						nextDecoder := newip4.NextLayerType()
+						nextDecoder.Decode(newip4.Payload, pb)
+					}
+				}
+
+				tcp := packet.Layer(layers.LayerTypeTCP)
+				if tcp != nil {
+					tcp := tcp.(*layers.TCP)
+					if *checksum {
+						err := tcp.SetNetworkLayerForChecksum(packet.NetworkLayer())
+						if err != nil {
+							log.Fatalf("Failed to set network layer for checksum: %s\n", err)
+						}
+					}
+					c := Context{
+						CaptureInfo: packet.Metadata().CaptureInfo,
+					}
+					assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
+				}
+
+			}
+		}
+
 		bytes += int64(len(data))
-
-		// defrag the IPv4 packet if required
-		if !*nodefrag {
-			ip4Layer := packet.Layer(layers.LayerTypeIPv4)
-			if ip4Layer == nil {
-				continue
-			}
-			ip4 := ip4Layer.(*layers.IPv4)
-			l := ip4.Length
-			newip4, err := defragger.DefragIPv4(ip4)
-			if err != nil {
-				log.Fatalln("Error while de-fragmenting", err)
-			} else if newip4 == nil {
-				Debug("Fragment...\n")
-				continue // ip packet fragment, we don't have whole packet yet.
-			}
-			if newip4.Length != l {
-				Debug("Decoding re-assembled packet: %s\n", newip4.NextLayerType())
-				pb, ok := packet.(gopacket.PacketBuilder)
-				if !ok {
-					panic("Not a PacketBuilder")
-				}
-				nextDecoder := newip4.NextLayerType()
-				nextDecoder.Decode(newip4.Payload, pb)
-			}
-		}
-
-		tcp := packet.Layer(layers.LayerTypeTCP)
-		if tcp != nil {
-			tcp := tcp.(*layers.TCP)
-			if *checksum {
-				err := tcp.SetNetworkLayerForChecksum(packet.NetworkLayer())
-				if err != nil {
-					log.Fatalf("Failed to set network layer for checksum: %s\n", err)
-				}
-			}
-			c := Context{
-				CaptureInfo: packet.Metadata().CaptureInfo,
-			}
-			assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
-		}
 
 		var done bool
 		select {
