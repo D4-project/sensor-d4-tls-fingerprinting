@@ -287,7 +287,7 @@ func main() {
 	// We start a worker to send the processed TLS connection the outside world
 	var w sync.WaitGroup
 	w.Add(1)
-	go processCompletedSession(jobQ, &w)
+	go processCompletedSession(cancelC, jobQ, &w)
 
 	var eth layers.Ethernet
 	var ip4 layers.IPv4
@@ -358,6 +358,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\nCaught SIGINT: aborting\n")
 			cancelC <- "stop"
 			done = true
+			break
 		default:
 			// NOP: continue
 		}
@@ -387,14 +388,18 @@ func queueSession(t d4tls.TLSSession) bool {
 	}
 }
 
-func processCompletedSession(jobQ <-chan d4tls.TLSSession, w *sync.WaitGroup) {
+func processCompletedSession(cancelC <-chan string, jobQ <-chan d4tls.TLSSession, w *sync.WaitGroup) {
 	for {
-		tlss, more := <-jobQ
-		if more {
-			output(tlss)
-		} else {
+		select {
+		case tlss, more := <-jobQ:
+			if more {
+				output(tlss)
+			} else {
+				w.Done()
+				return
+			}
+		case <-cancelC:
 			w.Done()
-			return
 		}
 	}
 }
