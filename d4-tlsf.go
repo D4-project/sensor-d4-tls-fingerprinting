@@ -33,7 +33,6 @@ var nodefrag = flag.Bool("nodefrag", false, "If true, do not do IPv4 defrag")
 var checksum = flag.Bool("checksum", false, "Check TCP checksum")
 var nooptcheck = flag.Bool("nooptcheck", false, "Do not check TCP options (useful to ignore MSS on captures with TSO)")
 var ignorefsmerr = flag.Bool("ignorefsmerr", false, "Ignore TCP FSM errors")
-var allowmissinginit = flag.Bool("allowmissinginit", false, "Support streams without SYN/SYN+ACK/ACK sequence")
 var verbose = flag.Bool("verbose", false, "Be verbose")
 var debug = flag.Bool("debug", false, "Display debug information")
 var quiet = flag.Bool("quiet", false, "Be quiet regarding errors")
@@ -41,9 +40,6 @@ var quiet = flag.Bool("quiet", false, "Be quiet regarding errors")
 // capture
 var iface = flag.String("i", "eth0", "Interface to read packets from")
 var fname = flag.String("r", "", "Filename to read from, overrides -i")
-
-// decoding
-//var LayerTypeETLS gopacket.LayerType
 
 // writing
 var outCerts = flag.String("w", "", "Folder to write certificates into")
@@ -88,9 +84,8 @@ type tcpStreamFactory struct {
 }
 
 func (factory *tcpStreamFactory) New(net, transport gopacket.Flow, tcp *layers.TCP, ac reassembly.AssemblerContext) reassembly.Stream {
-	Debug("* NEW: %s %s\n", net, transport)
 	fsmOptions := reassembly.TCPSimpleFSMOptions{
-		SupportMissingEstablishment: *allowmissinginit,
+		SupportMissingEstablishment: true,
 	}
 	stream := &tcpStream{
 		net:        net,
@@ -134,37 +129,36 @@ type tcpStream struct {
 	urls           []string
 	ident          string
 	tlsSession     d4tls.TLSSession
+	ignorefsmerr   bool
+	nooptcheck     bool
+	checksum       bool
 	sync.Mutex
 }
 
 func (t *tcpStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassembly.TCPFlowDirection, nextSeq reassembly.Sequence, start *bool, ac reassembly.AssemblerContext) bool {
 	// FSM
 	if !t.tcpstate.CheckState(tcp, dir) {
-		Error("FSM", "%s: Packet rejected by FSM (state:%s)\n", t.ident, t.tcpstate.String())
 		if !t.fsmerr {
 			t.fsmerr = true
 		}
-		if !*ignorefsmerr {
+		if !t.ignorefsmerr {
 			return false
 		}
 	}
 	// Options
 	err := t.optchecker.Accept(tcp, ci, dir, nextSeq, start)
 	if err != nil {
-		Error("OptionChecker", "%s: Packet rejected by OptionChecker: %s\n", t.ident, err)
-		if !*nooptcheck {
+		if !t.nooptcheck {
 			return false
 		}
 	}
 	// Checksum
 	accept := true
-	if *checksum {
+	if t.checksum {
 		c, err := tcp.ComputeChecksum()
 		if err != nil {
-			Error("ChecksumCompute", "%s: Got error computing checksum: %s\n", t.ident, err)
 			accept = false
 		} else if c != 0x0 {
-			Error("Checksum", "%s: Invalid checksum: 0x%x\n", t.ident, c)
 			accept = false
 		}
 	}
@@ -174,7 +168,7 @@ func (t *tcpStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassem
 func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.AssemblerContext) {
 	_, _, _, skip := sg.Info()
 	length, _ := sg.Lengths()
-	if skip == -1 && *allowmissinginit {
+	if skip == -1 {
 		// this is allowed
 	} else if skip != 0 {
 		// Missing bytes in stream: do not even try to parse it
@@ -236,7 +230,6 @@ func getIPPorts(t *tcpStream) (string, string, string, string) {
 }
 
 func (t *tcpStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
-	Debug("%s: Connection closed\n", t.ident)
 	// do not remove the connection to allow last ACK
 	return false
 }
@@ -371,6 +364,16 @@ func main() {
 	w.Wait()
 }
 
+// Tries to enqueue or false
+func queueSession(t d4tls.TLSSession) bool {
+	select {
+	case jobQ <- t:
+		return true
+	default:
+		return false
+	}
+}
+
 func processCompletedSession(jobQ <-chan d4tls.TLSSession, w *sync.WaitGroup) {
 	for {
 		tlss, more := <-jobQ
@@ -380,16 +383,6 @@ func processCompletedSession(jobQ <-chan d4tls.TLSSession, w *sync.WaitGroup) {
 			w.Done()
 			return
 		}
-	}
-}
-
-// Tries to enqueue or false
-func queueSession(t d4tls.TLSSession) bool {
-	select {
-	case jobQ <- t:
-		return true
-	default:
-		return false
 	}
 }
 
