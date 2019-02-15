@@ -305,25 +305,16 @@ func main() {
 			// Well it sures complaing about not knowing how to decode TCP
 		}
 
-		fmt.Printf("%s\n", ip4.SrcIP)
-		//		fmt.Printf("%s", hex.Dump(decoded))
-
 		for _, layerType := range decoded {
 			switch layerType {
 			case layers.LayerTypeIPv6:
-				fmt.Println("    IP6 ", ip6.SrcIP, ip6.DstIP)
+				//fmt.Println("    IP6 ", ip6.SrcIP, ip6.DstIP)
 			case layers.LayerTypeIPv4:
-
-				fmt.Println("    IP4 ", ip4.SrcIP, ip4.DstIP)
+				//fmt.Println("    IP4 ", ip4.SrcIP, ip4.DstIP)
 				// defrag the IPv4 packet if required
 				if !*nodefrag {
-					ip4Layer := packet.Layer(layers.LayerTypeIPv4)
-					if ip4Layer == nil {
-						continue
-					}
-					ip4 := ip4Layer.(*layers.IPv4)
 					l := ip4.Length
-					newip4, err := defragger.DefragIPv4(ip4)
+					newip4, err := defragger.DefragIPv4(&ip4)
 					if err != nil {
 						log.Fatalln("Error while de-fragmenting", err)
 					} else if newip4 == nil {
@@ -374,6 +365,8 @@ func main() {
 			break
 		}
 	}
+
+	Info(fmt.Sprintf("%d Bytes read.\n", bytes))
 
 	assembler.FlushAll()
 	streamFactory.WaitGoRoutines()
