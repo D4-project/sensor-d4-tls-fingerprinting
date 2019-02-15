@@ -33,7 +33,6 @@ var nodefrag = flag.Bool("nodefrag", false, "If true, do not do IPv4 defrag")
 var checksum = flag.Bool("checksum", false, "Check TCP checksum")
 var nooptcheck = flag.Bool("nooptcheck", false, "Do not check TCP options (useful to ignore MSS on captures with TSO)")
 var ignorefsmerr = flag.Bool("ignorefsmerr", false, "Ignore TCP FSM errors")
-var allowmissinginit = flag.Bool("allowmissinginit", false, "Support streams without SYN/SYN+ACK/ACK sequence")
 var verbose = flag.Bool("verbose", false, "Be verbose")
 var debug = flag.Bool("debug", false, "Display debug information")
 var quiet = flag.Bool("quiet", false, "Be quiet regarding errors")
@@ -41,9 +40,6 @@ var quiet = flag.Bool("quiet", false, "Be quiet regarding errors")
 // capture
 var iface = flag.String("i", "eth0", "Interface to read packets from")
 var fname = flag.String("r", "", "Filename to read from, overrides -i")
-
-// decoding
-//var LayerTypeETLS gopacket.LayerType
 
 // writing
 var outCerts = flag.String("w", "", "Folder to write certificates into")
@@ -88,9 +84,8 @@ type tcpStreamFactory struct {
 }
 
 func (factory *tcpStreamFactory) New(net, transport gopacket.Flow, tcp *layers.TCP, ac reassembly.AssemblerContext) reassembly.Stream {
-	Debug("* NEW: %s %s\n", net, transport)
 	fsmOptions := reassembly.TCPSimpleFSMOptions{
-		SupportMissingEstablishment: *allowmissinginit,
+		SupportMissingEstablishment: true,
 	}
 	stream := &tcpStream{
 		net:        net,
@@ -134,37 +129,36 @@ type tcpStream struct {
 	urls           []string
 	ident          string
 	tlsSession     d4tls.TLSSession
+	ignorefsmerr   bool
+	nooptcheck     bool
+	checksum       bool
 	sync.Mutex
 }
 
 func (t *tcpStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassembly.TCPFlowDirection, nextSeq reassembly.Sequence, start *bool, ac reassembly.AssemblerContext) bool {
 	// FSM
 	if !t.tcpstate.CheckState(tcp, dir) {
-		Error("FSM", "%s: Packet rejected by FSM (state:%s)\n", t.ident, t.tcpstate.String())
 		if !t.fsmerr {
 			t.fsmerr = true
 		}
-		if !*ignorefsmerr {
+		if !t.ignorefsmerr {
 			return false
 		}
 	}
 	// Options
 	err := t.optchecker.Accept(tcp, ci, dir, nextSeq, start)
 	if err != nil {
-		Error("OptionChecker", "%s: Packet rejected by OptionChecker: %s\n", t.ident, err)
-		if !*nooptcheck {
+		if !t.nooptcheck {
 			return false
 		}
 	}
 	// Checksum
 	accept := true
-	if *checksum {
+	if t.checksum {
 		c, err := tcp.ComputeChecksum()
 		if err != nil {
-			Error("ChecksumCompute", "%s: Got error computing checksum: %s\n", t.ident, err)
 			accept = false
 		} else if c != 0x0 {
-			Error("Checksum", "%s: Invalid checksum: 0x%x\n", t.ident, c)
 			accept = false
 		}
 	}
@@ -174,7 +168,7 @@ func (t *tcpStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassem
 func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.AssemblerContext) {
 	_, _, _, skip := sg.Info()
 	length, _ := sg.Lengths()
-	if skip == -1 && *allowmissinginit {
+	if skip == -1 {
 		// this is allowed
 	} else if skip != 0 {
 		// Missing bytes in stream: do not even try to parse it
@@ -236,7 +230,6 @@ func getIPPorts(t *tcpStream) (string, string, string, string) {
 }
 
 func (t *tcpStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
-	Debug("%s: Connection closed\n", t.ident)
 	// do not remove the connection to allow last ACK
 	return false
 }
@@ -272,12 +265,7 @@ func main() {
 		}
 	}
 
-	var dec gopacket.Decoder
-	var ok bool
-	if dec, ok = gopacket.DecodersByLayerName["Ethernet"]; !ok {
-		log.Fatal("No eth decoder")
-	}
-	source := gopacket.NewPacketSource(handle, dec)
+	source := gopacket.NewPacketSource(handle, handle.LinkType())
 	source.NoCopy = true
 	Info("Starting to read packets\n")
 	count := 0
@@ -301,52 +289,77 @@ func main() {
 	w.Add(1)
 	go processCompletedSession(jobQ, &w)
 
+	var eth layers.Ethernet
+	var ip4 layers.IPv4
+	var ip6 layers.IPv6
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6)
+	decoded := []gopacket.LayerType{}
+
 	for packet := range source.Packets() {
 		count++
 		Debug("PACKET #%d\n", count)
+
 		data := packet.Data()
+
+		if err := parser.DecodeLayers(data, &decoded); err != nil {
+			// Well it sures complaing about not knowing how to decode TCP
+		}
+
+		fmt.Printf("%s\n", ip4.SrcIP)
+		//		fmt.Printf("%s", hex.Dump(decoded))
+
+		for _, layerType := range decoded {
+			switch layerType {
+			case layers.LayerTypeIPv6:
+				fmt.Println("    IP6 ", ip6.SrcIP, ip6.DstIP)
+			case layers.LayerTypeIPv4:
+
+				fmt.Println("    IP4 ", ip4.SrcIP, ip4.DstIP)
+				// defrag the IPv4 packet if required
+				if !*nodefrag {
+					ip4Layer := packet.Layer(layers.LayerTypeIPv4)
+					if ip4Layer == nil {
+						continue
+					}
+					ip4 := ip4Layer.(*layers.IPv4)
+					l := ip4.Length
+					newip4, err := defragger.DefragIPv4(ip4)
+					if err != nil {
+						log.Fatalln("Error while de-fragmenting", err)
+					} else if newip4 == nil {
+						Debug("Fragment...\n")
+						continue // ip packet fragment, we don't have whole packet yet.
+					}
+					if newip4.Length != l {
+						Debug("Decoding re-assembled packet: %s\n", newip4.NextLayerType())
+						pb, ok := packet.(gopacket.PacketBuilder)
+						if !ok {
+							panic("Not a PacketBuilder")
+						}
+						nextDecoder := newip4.NextLayerType()
+						nextDecoder.Decode(newip4.Payload, pb)
+					}
+				}
+
+				tcp := packet.Layer(layers.LayerTypeTCP)
+				if tcp != nil {
+					tcp := tcp.(*layers.TCP)
+					if *checksum {
+						err := tcp.SetNetworkLayerForChecksum(packet.NetworkLayer())
+						if err != nil {
+							log.Fatalf("Failed to set network layer for checksum: %s\n", err)
+						}
+					}
+					c := Context{
+						CaptureInfo: packet.Metadata().CaptureInfo,
+					}
+					assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
+				}
+
+			}
+		}
+
 		bytes += int64(len(data))
-
-		// defrag the IPv4 packet if required
-		if !*nodefrag {
-			ip4Layer := packet.Layer(layers.LayerTypeIPv4)
-			if ip4Layer == nil {
-				continue
-			}
-			ip4 := ip4Layer.(*layers.IPv4)
-			l := ip4.Length
-			newip4, err := defragger.DefragIPv4(ip4)
-			if err != nil {
-				log.Fatalln("Error while de-fragmenting", err)
-			} else if newip4 == nil {
-				Debug("Fragment...\n")
-				continue // ip packet fragment, we don't have whole packet yet.
-			}
-			if newip4.Length != l {
-				Debug("Decoding re-assembled packet: %s\n", newip4.NextLayerType())
-				pb, ok := packet.(gopacket.PacketBuilder)
-				if !ok {
-					panic("Not a PacketBuilder")
-				}
-				nextDecoder := newip4.NextLayerType()
-				nextDecoder.Decode(newip4.Payload, pb)
-			}
-		}
-
-		tcp := packet.Layer(layers.LayerTypeTCP)
-		if tcp != nil {
-			tcp := tcp.(*layers.TCP)
-			if *checksum {
-				err := tcp.SetNetworkLayerForChecksum(packet.NetworkLayer())
-				if err != nil {
-					log.Fatalf("Failed to set network layer for checksum: %s\n", err)
-				}
-			}
-			c := Context{
-				CaptureInfo: packet.Metadata().CaptureInfo,
-			}
-			assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
-		}
 
 		var done bool
 		select {
@@ -371,6 +384,16 @@ func main() {
 	w.Wait()
 }
 
+// Tries to enqueue or false
+func queueSession(t d4tls.TLSSession) bool {
+	select {
+	case jobQ <- t:
+		return true
+	default:
+		return false
+	}
+}
+
 func processCompletedSession(jobQ <-chan d4tls.TLSSession, w *sync.WaitGroup) {
 	for {
 		tlss, more := <-jobQ
@@ -380,16 +403,6 @@ func processCompletedSession(jobQ <-chan d4tls.TLSSession, w *sync.WaitGroup) {
 			w.Done()
 			return
 		}
-	}
-}
-
-// Tries to enqueue or false
-func queueSession(t d4tls.TLSSession) bool {
-	select {
-	case jobQ <- t:
-		return true
-	default:
-		return false
 	}
 }
 

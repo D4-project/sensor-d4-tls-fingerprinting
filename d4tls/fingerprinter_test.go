@@ -205,7 +205,6 @@ func TestJA3(t *testing.T) {
 					// Populate Client Hello related fields
 					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello, "", "", "", "", time.Now())
 					tlss.D4Fingerprinting("ja3")
-					// TODO check that againt the reference python implementation
 					t.Logf("%v", tlss.Record.JA3)
 					t.Logf("%v", tlss.Record.JA3Digest)
 				}
@@ -229,7 +228,6 @@ func TestJA3s(t *testing.T) {
 					// Populate Server Hello related fields
 					tlss.PopulateServerHello(etlsrecord.ETLSHandshakeServerHello)
 					tlss.D4Fingerprinting("ja3s")
-					// TODO check that againt the reference python implementation
 					t.Logf("%v", tlss.Record.JA3S)
 					t.Logf("%v", tlss.Record.JA3SDigest)
 				}
@@ -253,7 +251,7 @@ func TestTLSH(t *testing.T) {
 					// Populate Cert
 					tlss.PopulateCertificate(etlsrecord.ETLSHandshakeCertificate)
 					tlss.D4Fingerprinting("tlsh")
-					// TODO check that againt the reference implementation
+					// TODO check that against the reference implementation
 					t.Logf("%v", tlss.Record.TLSH)
 				}
 			}
