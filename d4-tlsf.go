@@ -49,6 +49,11 @@ var jobQ chan d4tls.TLSSession
 const closeTimeout time.Duration = time.Hour * 24 // Closing inactive: TODO: from CLI
 const timeout time.Duration = time.Minute * 5     // Pending bytes: TODO: from CLI
 
+var assemblerOptions = reassembly.AssemblerOptions{
+	MaxBufferedPagesPerConnection: 16,
+	MaxBufferedPagesTotal:         0, // unlimited
+}
+
 var outputLevel int
 var errorsMap map[string]uint
 var errorsMapMutex sync.Mutex
@@ -230,11 +235,12 @@ func getIPPorts(t *tcpStream) (string, string, string, string) {
 }
 
 func (t *tcpStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
-	// do not remove the connection to allow last ACK
-	return false
+	// remove connection from the pool
+	return true
 }
 
 func main() {
+
 	defer util.Run()()
 	var handle *pcap.Handle
 	var err error
@@ -275,6 +281,7 @@ func main() {
 	streamFactory := &tcpStreamFactory{}
 	streamPool := reassembly.NewStreamPool(streamFactory)
 	assembler := reassembly.NewAssembler(streamPool)
+	assembler.AssemblerOptions = assemblerOptions
 
 	// Signal chan for system signals
 	signalChan := make(chan os.Signal, 1)
@@ -346,7 +353,9 @@ func main() {
 					}
 					assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
 				}
-
+				//ref := packet.Metadata().CaptureInfo.Timestamp
+				//flushed, closed := assembler.FlushWithOptions(reassembly.FlushOptions{T: ref.Add(time.Minute * 30), TC: ref.Add(time.Minute * 5)})
+				//Debug("Forced flush: %d flushed, %d closed (%s)", flushed, closed, ref)
 			}
 		}
 
