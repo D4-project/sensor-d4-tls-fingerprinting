@@ -49,6 +49,7 @@ func (t *TLSSession) d4fg() string {
 
 func (t *TLSSession) ja3s() bool {
 	var buf []byte
+
 	buf = strconv.AppendInt(buf, int64(t.handShakeRecord.ETLSHandshakeServerHello.Vers), 10)
 	// byte (44) is ","
 	buf = append(buf, byte(44))
@@ -81,6 +82,7 @@ func (t *TLSSession) ja3s() bool {
 
 func (t *TLSSession) ja3() bool {
 	var buf []byte
+
 	buf = strconv.AppendInt(buf, int64(t.handShakeRecord.ETLSHandshakeClientHello.Vers), 10)
 	// byte (44) is ","
 	buf = append(buf, byte(44))

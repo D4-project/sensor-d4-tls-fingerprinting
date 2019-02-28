@@ -36,6 +36,7 @@ var ignorefsmerr = flag.Bool("ignorefsmerr", false, "Ignore TCP FSM errors")
 var verbose = flag.Bool("verbose", false, "Be verbose")
 var debug = flag.Bool("debug", false, "Display debug information")
 var quiet = flag.Bool("quiet", false, "Be quiet regarding errors")
+var partial = flag.Bool("partial", true, "Output partial TLS Sessions, e.g. where we don't see all three of client hello, server hello and certificate")
 
 // capture
 var iface = flag.String("i", "eth0", "Interface to read packets from")
@@ -101,6 +102,11 @@ func (factory *tcpStreamFactory) New(net, transport gopacket.Flow, tcp *layers.T
 		optchecker: reassembly.NewTCPOptionCheck(),
 		tlsSession: d4tls.TLSSession{},
 	}
+
+	// Set network information in the TLSSession
+	cip, sip, cp, sp := getIPPorts(stream)
+	stream.tlsSession.SetNetwork(cip, sip, cp, sp)
+
 	return stream
 }
 
@@ -134,6 +140,7 @@ type tcpStream struct {
 	urls           []string
 	ident          string
 	tlsSession     d4tls.TLSSession
+	queued         bool
 	ignorefsmerr   bool
 	nooptcheck     bool
 	checksum       bool
@@ -181,6 +188,7 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 	}
 	data := sg.Fetch(length)
 	if t.isTLS {
+
 		if length > 0 {
 			// We attempt to decode TLS
 			tls := &etls.ETLS{}
@@ -195,13 +203,18 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 				//Debug("TLS: %s\n", gopacket.LayerDump(tls))
 				//		Debug("TLS: %s\n", gopacket.LayerGoString(tls))
 				if tls.Handshake != nil {
+
+					// If the timestamp has not been set, we set it for the first time.
+					if t.tlsSession.Record.Timestamp.IsZero() {
+						info := sg.CaptureInfo(0)
+						t.tlsSession.SetTimestamp(info.Timestamp)
+					}
+
 					for _, tlsrecord := range tls.Handshake {
 						switch tlsrecord.ETLSHandshakeMsgType {
 						// Client Hello
 						case 1:
-							info := sg.CaptureInfo(0)
-							cip, sip, cp, sp := getIPPorts(t)
-							t.tlsSession.PopulateClientHello(tlsrecord.ETLSHandshakeClientHello, cip, sip, cp, sp, info.Timestamp)
+							t.tlsSession.PopulateClientHello(tlsrecord.ETLSHandshakeClientHello)
 							t.tlsSession.D4Fingerprinting("ja3")
 						// Server Hello
 						case 2:
@@ -210,14 +223,15 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 						// Server Certificate
 						case 11:
 							t.tlsSession.PopulateCertificate(tlsrecord.ETLSHandshakeCertificate)
-
 							t.tlsSession.D4Fingerprinting("tlsh")
-							// If we get a cert, we consider the handshake as finished and ready to ship to D4
-							queueSession(t.tlsSession)
-						default:
-							break
 						}
 					}
+
+					// If the handshake is considered finished and we have not yet outputted it we ship it to output.
+					if t.tlsSession.HandshakeComplete() && !t.queued {
+						t.queueSession()
+					}
+
 				}
 			}
 		}
@@ -235,6 +249,12 @@ func getIPPorts(t *tcpStream) (string, string, string, string) {
 }
 
 func (t *tcpStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
+	// If the handshakre has not yet been outputted, but there are some information such as
+	// either the client hello or the server hello, we also output a partial.
+	if *partial && !t.queued && t.tlsSession.HandshakeAny() {
+		t.queueSession()
+	}
+
 	// remove connection from the pool
 	return true
 }
@@ -288,7 +308,7 @@ func main() {
 	signal.Notify(signalChan, os.Interrupt)
 
 	// Job chan to hold Completed sessions to write
-	jobQ = make(chan d4tls.TLSSession, 100)
+	jobQ = make(chan d4tls.TLSSession, 4096)
 	cancelC := make(chan string)
 
 	// We start a worker to send the processed TLS connection the outside world
@@ -387,10 +407,13 @@ func main() {
 	w.Wait()
 }
 
-// Tries to enqueue or false
-func queueSession(t d4tls.TLSSession) bool {
+// queueSession tries to enqueue the tlsSession for output
+// returns true if it succeeded or false if it failed to publish the
+// tlsSession for output
+func (t *tcpStream) queueSession() bool {
+	t.queued = true
 	select {
-	case jobQ <- t:
+	case jobQ <- t.tlsSession:
 		return true
 	default:
 		return false
@@ -414,7 +437,6 @@ func processCompletedSession(cancelC <-chan string, jobQ <-chan d4tls.TLSSession
 }
 
 func output(t d4tls.TLSSession) {
-
 	jsonRecord, _ := json.MarshalIndent(t.Record, "", "    ")
 
 	// If an output folder was specified for certificates
