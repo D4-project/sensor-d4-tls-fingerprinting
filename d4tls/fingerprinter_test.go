@@ -203,7 +203,8 @@ func TestJA3(t *testing.T) {
 			for _, etlsrecord := range tls.Handshake {
 				if etlsrecord.ETLSHandshakeMsgType == 1 {
 					// Populate Client Hello related fields
-					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello, "", "", "", "", time.Now())
+					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello)
+					tlss.SetTimestamp(time.Now())
 					tlss.D4Fingerprinting("ja3")
 					t.Logf("%v", tlss.Record.JA3)
 					t.Logf("%v", tlss.Record.JA3Digest)
@@ -279,7 +280,8 @@ func TestGreaseClientHelloExtensionExlusion(t *testing.T) {
 			for _, etlsrecord := range tls.Handshake {
 				if etlsrecord.ETLSHandshakeMsgType == 1 {
 					// Populate Client Hello related fields
-					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello, "", "", "", "", time.Now())
+					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello)
+					tlss.SetTimestamp(time.Now())
 					tlss.D4Fingerprinting("ja3")
 					t.Logf("%v", tlss.Record.JA3Digest)
 					if strings.Index(tlss.Record.JA3, "2570") != -1 {
@@ -312,7 +314,8 @@ func TestGreaseClientHelloCipherExlusion(t *testing.T) {
 			for _, etlsrecord := range tls.Handshake {
 				if etlsrecord.ETLSHandshakeMsgType == 1 {
 					// Populate Client Hello related fields
-					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello, "", "", "", "", time.Now())
+					tlss.PopulateClientHello(etlsrecord.ETLSHandshakeClientHello)
+					tlss.SetTimestamp(time.Now())
 					tlss.D4Fingerprinting("ja3")
 					if strings.Index(tlss.Record.JA3, "2570") != -1 {
 						t.Logf("GREASE values should not end up in JA3\n")
