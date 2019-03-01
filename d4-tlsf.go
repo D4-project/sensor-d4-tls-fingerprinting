@@ -463,11 +463,17 @@ func output(t d4tls.TLSSession) {
 		} else {
 			panic(fmt.Sprintf("./%s does not exist", *outJSON))
 		}
-		// If not folder specidied, we output to stdout
+		// If not folder specified, we output to stdout
 	} else {
-		r := bytes.NewReader(jsonRecord)
-		_, err := io.Copy(os.Stdout, r)
-		if err != nil {
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, jsonRecord); err != nil {
+			fmt.Println("Failed to compact json output")
+		}
+		if _, err := buf.Write([]byte{0x0A}); err != nil {
+			fmt.Println("Could not append delimiter")
+		}
+
+		if _, err := io.Copy(os.Stdout, &buf); err != nil {
 			panic("Could not write to stdout.")
 		}
 	}
