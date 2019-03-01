@@ -34,7 +34,35 @@ type sessionRecord struct {
 type TLSSession struct {
 	Record          sessionRecord
 	handShakeRecord etls.ETLSHandshakeRecord
-	stage           int
+	state           HandshakeState
+}
+
+// HandshakeComplete returns true if the TLS session has seen all three client helo, server helo and the certificate.
+func (t *TLSSession) HandshakeComplete() bool {
+	return t.state.Has(StateClientHello) &&
+		t.state.Has(StateServerHello) &&
+		t.state.Has(StateCertificate)
+}
+
+// HandshakePartially returns true if the client hello and server hello is set, but not the certificate.
+func (t *TLSSession) HandshakePartially() bool {
+	return t.state.Has(StateClientHello) &&
+		t.state.Has(StateServerHello) &&
+		!t.state.Has(StateCertificate)
+}
+
+// HandshakeAny returns true if any of the client or server has been seen
+func (t *TLSSession) HandshakeAny() bool {
+	return t.state.Has(StateClientHello) ||
+		t.state.Has(StateServerHello)
+}
+
+func (t *TLSSession) HandshakeState() string {
+	return fmt.Sprintf("ClientHello:%t ServerHello:%t Certificate:%t",
+		t.state.Has(StateClientHello),
+		t.state.Has(StateServerHello),
+		t.state.Has(StateCertificate),
+	)
 }
 
 // String returns a string that describes a TLSSession
@@ -59,40 +87,44 @@ func (t *TLSSession) String() string {
 	return buf.String()
 }
 
+// SetNetwork sets the network part in the TLSSession.Record struct.
+func (t *TLSSession) SetNetwork(cip string, sip string, cp string, sp string) {
+	t.Record.ClientIP = cip
+	t.Record.ServerIP = sip
+	t.Record.ClientPort = cp
+	t.Record.ServerPort = sp
+}
+
+// SetTimestamp sets the timestamp of this TLSSession in its TLSSession.Record struct
+func (t *TLSSession) SetTimestamp(ti time.Time) {
+	t.Record.Timestamp = ti
+}
+
 // PopulateClientHello takes a pointer to an etls ClientHelloMsg and writes it to the the TLSSession struct
-func (t *TLSSession) PopulateClientHello(h *etls.ClientHelloMsg, cip string, sip string, cp string, sp string, ti time.Time) {
-	if t.stage < 1 {
-		t.Record.ClientIP = cip
-		t.Record.ServerIP = sip
-		t.Record.ClientPort = cp
-		t.Record.ServerPort = sp
-		t.Record.Timestamp = ti
-		t.handShakeRecord.ETLSHandshakeClientHello = h
-		t.stage = 1
-	}
+func (t *TLSSession) PopulateClientHello(h *etls.ClientHelloMsg) {
+	t.state.Set(StateClientHello)
+	t.handShakeRecord.ETLSHandshakeClientHello = h
 }
 
 // PopulateServerHello takes a pointer to an etls ServerHelloMsg and writes it to the TLSSession struct
 func (t *TLSSession) PopulateServerHello(h *etls.ServerHelloMsg) {
-	if t.stage < 2 {
-		t.handShakeRecord.ETLSHandshakeServerHello = h
-		t.stage = 2
-	}
+	t.state.Set(StateServerHello)
+	t.handShakeRecord.ETLSHandshakeServerHello = h
 }
 
 // PopulateCertificate takes a pointer to an etls ServerHelloMsg and writes it to the TLSSession struct
 func (t *TLSSession) PopulateCertificate(c *etls.CertificateMsg) {
-	if t.stage < 3 {
-		t.handShakeRecord.ETLSHandshakeCertificate = c
-		for _, asn1Data := range t.handShakeRecord.ETLSHandshakeCertificate.Certificates {
-			cert, err := x509.ParseCertificate(asn1Data)
-			if err != nil {
-				//return err
-			} else {
-				h := sha256.New()
-				h.Write(cert.Raw)
-				t.Record.Certificates = append(t.Record.Certificates, certMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))})
-			}
+	t.state.Set(StateCertificate)
+	t.handShakeRecord.ETLSHandshakeCertificate = c
+
+	for _, asn1Data := range t.handShakeRecord.ETLSHandshakeCertificate.Certificates {
+		cert, err := x509.ParseCertificate(asn1Data)
+		if err != nil {
+			//return err
+		} else {
+			h := sha256.New()
+			h.Write(cert.Raw)
+			t.Record.Certificates = append(t.Record.Certificates, certMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))})
 		}
 	}
 }
