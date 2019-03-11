@@ -47,12 +47,16 @@ var outCerts = flag.String("w", "", "Folder to write certificates into")
 var outJSON = flag.String("j", "", "Folder to write certificates into, stdin if not set")
 var jobQ chan d4tls.TLSSession
 
+// memory
+var bufferedPagesPerConnection = flag.Int("mbpc", 16, "Max Buffered Pages per Connection.")
+var bufferedPagesTotal = flag.Int("mbpt", 1024, "Max Total Buffered Pages.")
+
 const closeTimeout time.Duration = time.Hour * 24 // Closing inactive: TODO: from CLI
 const timeout time.Duration = time.Minute * 5     // Pending bytes: TODO: from CLI
 
 var assemblerOptions = reassembly.AssemblerOptions{
-	MaxBufferedPagesPerConnection: 16,
-	MaxBufferedPagesTotal:         0, // unlimited
+	MaxBufferedPagesPerConnection: *bufferedPagesPerConnection,
+	MaxBufferedPagesTotal:         *bufferedPagesTotal, // unlimited
 }
 
 var outputLevel int
