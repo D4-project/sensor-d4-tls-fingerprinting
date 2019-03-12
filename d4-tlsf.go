@@ -51,8 +51,12 @@ var jobQ chan d4tls.TLSSession
 var bufferedPagesPerConnection = flag.Int("mbpc", 16, "Max Buffered Pages per Connection.")
 var bufferedPagesTotal = flag.Int("mbpt", 1024, "Max Total Buffered Pages.")
 
-const closeTimeout time.Duration = time.Hour * 24 // Closing inactive: TODO: from CLI
-const timeout time.Duration = time.Minute * 5     // Pending bytes: TODO: from CLI
+// flushing
+var flushEvery = flag.Int("flush", 5000, "Flush every N packets")
+var dtf, _ = time.ParseDuration("5m")
+var dtc, _ = time.ParseDuration("48h")
+var flushTf = flag.Duration("flushtf", dtf, "Flush older than t")
+var flushTc = flag.Duration("flushtc", dtc, "Close older that t")
 
 var assemblerOptions = reassembly.AssemblerOptions{
 	MaxBufferedPagesPerConnection: *bufferedPagesPerConnection,
@@ -231,11 +235,9 @@ func (t *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 						}
 					}
 
-					// If the handshake is considered finished and we have not yet outputted it we ship it to output.
 					if t.tlsSession.HandshakeComplete() && !t.queued {
 						t.queueSession()
 					}
-
 				}
 			}
 		}
@@ -377,9 +379,11 @@ func main() {
 					}
 					assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
 				}
-				//ref := packet.Metadata().CaptureInfo.Timestamp
-				//flushed, closed := assembler.FlushWithOptions(reassembly.FlushOptions{T: ref.Add(time.Minute * 30), TC: ref.Add(time.Minute * 5)})
-				//Debug("Forced flush: %d flushed, %d closed (%s)", flushed, closed, ref)
+				if count%*flushEvery == 0{
+					ref := packet.Metadata().CaptureInfo.Timestamp
+					flushed, closed := assembler.FlushWithOptions(reassembly.FlushOptions{T: ref.Add(-*flushTf), TC: ref.Add(-*flushTc)})
+					Debug("Forced flush: %d flushed, %d closed (%s)", flushed, closed, ref)
+				}
 			}
 		}
 
