@@ -379,7 +379,7 @@ func main() {
 					}
 					assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
 				}
-				if count%*flushEvery == 0{
+				if count%*flushEvery == 0 {
 					ref := packet.Metadata().CaptureInfo.Timestamp
 					flushed, closed := assembler.FlushWithOptions(reassembly.FlushOptions{T: ref.Add(-*flushTf), TC: ref.Add(-*flushTc)})
 					Debug("Forced flush: %d flushed, %d closed (%s)", flushed, closed, ref)
@@ -445,7 +445,7 @@ func processCompletedSession(cancelC <-chan string, jobQ <-chan d4tls.TLSSession
 }
 
 func output(t d4tls.TLSSession) {
-	jsonRecord, _ := json.MarshalIndent(t.Record, "", "    ")
+	jsonRecord, _ := json.Marshal(t.Record)
 
 	// If an output folder was specified for certificates
 	if *outCerts != "" {
@@ -464,7 +464,7 @@ func output(t d4tls.TLSSession) {
 	// If an output folder was specified for json files
 	if *outJSON != "" {
 		if _, err := os.Stat(fmt.Sprintf("./%s", *outJSON)); !os.IsNotExist(err) {
-			err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.json", *outJSON, t.Record.Timestamp.Format(time.RFC3339)), jsonRecord, 0644)
+			err := ioutil.WriteFile(fmt.Sprintf("./%s/%s.json", *outJSON, t.Record.Timestamp.Format(time.RFC3339Nano)), jsonRecord, 0644)
 			if err != nil {
 				panic("Could not write to file.")
 			}
