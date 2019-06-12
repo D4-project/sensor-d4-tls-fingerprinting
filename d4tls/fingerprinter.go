@@ -10,6 +10,9 @@ import (
 	"github.com/glaslos/tlsh"
 )
 
+// see https://tools.ietf.org/html/draft-ietf-tls-grease-02
+// grease values for cipher suites, ALPN and identifiers,
+// extensions, named groups, signatur algorithms, and versions.
 var grease = map[uint16]bool{
 	0x0a0a: true, 0x1a1a: true, 0x2a2a: true, 0x3a3a: true,
 	0x4a4a: true, 0x5a5a: true, 0x6a6a: true, 0x7a7a: true,
@@ -17,7 +20,7 @@ var grease = map[uint16]bool{
 	0xcaca: true, 0xdada: true, 0xeaea: true, 0xfafa: true,
 }
 
-// D4Fingerprinting computes fingerprints doh
+// D4Fingerprinting computes fingerprints
 func (t *TLSSession) D4Fingerprinting(fd string) bool {
 	switch fd {
 	case "ja3":
@@ -117,9 +120,11 @@ func (t *TLSSession) ja3() bool {
 	// If there are Supported Curves
 	if len(t.handShakeRecord.ETLSHandshakeClientHello.SupportedCurves) > 0 {
 		for i, cs := range t.handShakeRecord.ETLSHandshakeClientHello.SupportedCurves {
-			buf = strconv.AppendInt(buf, int64(cs), 10)
-			if (i + 1) < len(t.handShakeRecord.ETLSHandshakeClientHello.SupportedCurves) {
-				buf = append(buf, byte(45))
+			if grease[uint16(cs)] == false {
+				buf = strconv.AppendInt(buf, int64(cs), 10)
+				if (i + 1) < len(t.handShakeRecord.ETLSHandshakeClientHello.SupportedCurves) {
+					buf = append(buf, byte(45))
+				}
 			}
 		}
 	}
@@ -128,9 +133,11 @@ func (t *TLSSession) ja3() bool {
 	// If there are Supported Points
 	if len(t.handShakeRecord.ETLSHandshakeClientHello.SupportedPoints) > 0 {
 		for i, cs := range t.handShakeRecord.ETLSHandshakeClientHello.SupportedPoints {
-			buf = strconv.AppendInt(buf, int64(cs), 10)
-			if (i + 1) < len(t.handShakeRecord.ETLSHandshakeClientHello.SupportedPoints) {
-				buf = append(buf, byte(45))
+			if grease[uint16(cs)] == false {
+				buf = strconv.AppendInt(buf, int64(cs), 10)
+				if (i + 1) < len(t.handShakeRecord.ETLSHandshakeClientHello.SupportedPoints) {
+					buf = append(buf, byte(45))
+				}
 			}
 		}
 	}
