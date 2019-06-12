@@ -2,7 +2,7 @@ package d4tls
 
 import (
 	"bytes"
-	"crypto/sha256"
+	"crypto/sha1"
 	"crypto/x509"
 	"fmt"
 	"time"
@@ -122,7 +122,7 @@ func (t *TLSSession) PopulateCertificate(c *etls.CertificateMsg) {
 		if err != nil {
 			//return err
 		} else {
-			h := sha256.New()
+			h := sha1.New()
 			h.Write(cert.Raw)
 			t.Record.Certificates = append(t.Record.Certificates, certMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))})
 		}
